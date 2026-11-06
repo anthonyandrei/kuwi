@@ -1,9 +1,8 @@
 # Kuwi product app
 
-This is the initial PHP setup slice for issue #2, separate from the disposable
-storage probe. Issue #2 remains incomplete. Additional currencies, reference
-validation, full onboarding/motion fidelity, failure/interruption tests, and
-physical Home Screen installation/offline closure checks remain outstanding.
+Issue #2's local setup app is separate from the disposable storage probe.
+It uses Expo, React Native Web, Expo Router, Reanimated, and the supplied third
+quokka reference with cream and sage colors. Local use requires no sign-in.
 
 From the repository root:
 
@@ -15,22 +14,28 @@ cd apps/kuwi
 node scripts/serve.mjs
 ```
 
-Open http://127.0.0.1:4183. The static export includes the worker, SQLite WASM,
-manifest, icons, and a service worker. HTTPS hosting is required for a phone;
-no deployment has been made or hosting provider selected. Development through
-Expo does not produce the offline installation bundle.
+Open http://127.0.0.1:4183. The static export includes the worker, pinned SQLite
+WASM, manifest, icons, and a service worker that caches startup files. Expo's
+development server does not produce the offline installation bundle.
 
-Run browser journeys after building:
+After building, run the product journeys from `apps/kuwi`:
 
 ```sh
-pnpm exec playwright test --config apps/kuwi/playwright.config.mjs
+pnpm exec playwright test --config playwright.config.mjs
 ```
 
-The database uses product-specific OPFS paths and a product-specific Web Lock.
-It never opens the probe's files. Startup preserves existing files and displays
-errors without a fallback ledger. Close database releases file handles before
-the ownership lock. Another tab can then retry opening the saved account.
-Safari and the installed Home Screen app have separate stores.
+Tests use real OPFS, an independent loopback origin for each journey, and disk
+profiles for WebKit. A local test server can alter the served worker to inject
+write/migration failures, interrupt an active transaction, or lose a save reply. These controls are absent from
+the exported production app. The tests assert visible setup, balances,
+rollback/retry, ownership handoff, and offline reopening after browser closure.
+
+The database uses product-specific OPFS paths and a Web Lock acquired before
+opening files. It never opens the probe's files. Startup preserves existing
+files and displays failures without a fallback ledger. Closing the database
+releases file handles before the ownership lock. Another tab can then retry
+opening the same saved account. Safari and the installed Home Screen app have
+separate stores.
 
 The schema stores currencies, profiles, accounts, and one setup completion
 record. Each table has an explicit primary key. Currency precision depends
@@ -38,28 +43,37 @@ only on currency code; profile preferences depend on profile ID; opening
 balance and currency depend on account ID. Setup references its profile and
 first account. No derived display balance, duplicated currency metadata, or
 profile snapshot is stored. Related setup inserts share one immediate SQLite
-transaction. A repeated completion returns the already committed setup and
-never inserts a second opening account. Local setup has no cloud dependency.
+transaction. Stable local profile/account keys and a singleton completion
+record make retries return the committed setup without another opening record.
+A missing save reply terminates the worker after 15 seconds and exposes a retry.
+Retrying checks canonical setup before inserting. Local setup has no Clerk or
+Convex dependency.
 
-Only the observed PHP path is enabled. Its default is Cash with zero opening
-balance. The amount input currently rejects more than two decimal places;
-Tarsi uses a calculator that ignored a third decimal digit in the observed
-example. This is an explicit fidelity gap, not verified equivalent behavior.
-The iPhone observations are in ../../docs/tarsi-iphone-onboarding.md.
+The six observed currency tiles are PHP, USD, EUR, GBP, JPY, and TWD. PHP, Cash,
+and zero are the defaults. JPY uses whole units; the other enabled currencies
+use two fractional digits. The number pad ignores a third fractional digit,
+matching the observed PHP 1,234.56 example. Invalid pasted decimal text is
+rejected. Native observations and separate shipped-web evidence are recorded
+in [the onboarding notes](../../docs/tarsi-iphone-onboarding.md).
 
-The quokka image is the third reference supplied by Anthony in the planning
-chat. No Tarsi source or artwork is included.
+## Remaining acceptance work
+
+HTTPS publication requires Anthony's approval under the parent specification.
+No product deployment has been made. Installation, phone layout/motion and
+keyboard comparison, full app closure, and offline reopening on the physical
+iPhone remain required before closing #2. Desktop WebKit passes cannot replace
+those checks. This app does not implement backup/restore or later finance
+journeys, which belong to subsequent work under the parent issue.
 
 ## Validation on 2026-11-07
 
-TypeScript typechecking and JavaScript syntax checks passed. The two-axis
-review identified missing acceptance criteria; issue #2 remains open. The
-mechanical UI detector reported no findings. Runtime product tests could not
-run: both Expo export attempts stalled before producing an HTML entry. The
-second attempt used one worker and disabled minification. The host reported a
-load average above 200 and 94 MB unused memory during investigation.
+The product export, TypeScript, JavaScript syntax, and diff checks pass.
+The full Chromium/WebKit suite passed 16 checks. After separating the lost-reply
+and browser-closure journeys to isolate fault injection from precaching, all
+four focused checks passed in both engines. The suite now contains nine
+journeys per engine. The PHP keypad example and interruption during an active
+transaction passed in both engines in the full run.
 
-The existing disposable probe's 12 Chromium checks passed. WebKit then suffered
-repeated timeouts, and that suite was interrupted. Those probe results do not
-validate the new product app. Neither a successful product export nor phone
-installation/offline reopening has been established. No deployment occurred.
+Standards review found no actionable code defects. Spec review prompted the
+save timeout, visible retry, and interrupted-transaction test. The installed
+iPhone checks above remain outstanding. These results do not close issue #2.
