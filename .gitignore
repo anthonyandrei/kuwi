@@ -4,3 +4,5 @@ playwright-report/
 .DS_Store
 prototypes/storage-pwa/.local/
 .impeccable/hook.cache.json
+.vercel/
+.env.local

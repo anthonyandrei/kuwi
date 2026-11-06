@@ -56,14 +56,37 @@ matching the observed PHP 1,234.56 example. Invalid pasted decimal text is
 rejected. Native observations and separate shipped-web evidence are recorded
 in [the onboarding notes](../../docs/tarsi-iphone-onboarding.md).
 
+## Vercel hosting
+
+Anthony selected Vercel on 2026-11-07. The Kuwi project belongs to
+`anthonyandreitan-7469s-projects` and is linked locally through ignored
+`.vercel/project.json`. The app is available at https://kuwi-ten.vercel.app.
+The first deployment became production despite an explicit preview target;
+no existing deployment was replaced. Later deployments should use preview
+unless promotion is explicitly intended.
+
+`vercel.json` defines the workspace build and output directory. To upload
+only a locally built static export:
+
+```sh
+pnpm --filter @kuwi/app build
+node apps/kuwi/scripts/prepare-vercel.mjs
+vercel deploy --prebuilt --target=preview --scope anthonyandreitan-7469s-projects
+```
+
+The packaging script replaces only its generated `.vercel/output/static`
+directory and carries the service-worker revalidation header into Vercel's
+Build Output configuration. Local Vercel credentials and environment files
+are ignored. The earlier Cloudflare storage probe remains a separate test.
+No Cloudflare product deployment or storage migration was needed.
+
 ## Remaining acceptance work
 
-HTTPS publication requires Anthony's approval under the parent specification.
-No product deployment has been made. Installation, phone layout/motion and
-keyboard comparison, full app closure, and offline reopening on the physical
-iPhone remain required before closing #2. Desktop WebKit passes cannot replace
-those checks. This app does not implement backup/restore or later finance
-journeys, which belong to subsequent work under the parent issue.
+Installation, phone layout/motion and keyboard comparison, full app closure,
+and offline reopening on the physical iPhone remain required before closing
+#2. Desktop WebKit passes cannot replace those checks. This app does not
+implement backup/restore or later finance journeys, which belong to subsequent
+work under the parent issue.
 
 ## Validation on 2026-11-07
 
@@ -77,3 +100,15 @@ transaction passed in both engines in the full run.
 Standards review found no actionable code defects. Spec review prompted the
 save timeout, visible retry, and interrupted-transaction test. The installed
 iPhone checks above remain outstanding. These results do not close issue #2.
+
+## Vercel verification on 2026-11-07
+
+The HTTPS deployment passed setup, saved-account, and offline-reload smoke
+checks in Chromium and disk-backed WebKit, with no JavaScript page errors.
+Nine published shell, worker, WASM, manifest, and image files matched the local
+build byte for byte. The service worker returns `Cache-Control: no-cache` and
+SQLite WASM returns `application/wasm`. An ephemeral WebKit context could not
+open storage; the disk-backed check uses the established test approach.
+
+iPhone Mirroring timed out on both connection attempts. Physical installation
+and offline closure verification are pending reconnection.
