@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "Kuwi",
+    "slug": "kuwi",
+    "scheme": "kuwi",
+    "web": {
+      "output": "static"
+    },
+    "plugins": [
+      "expo-router"
+    ]
+  }
+}
