@@ -34,6 +34,16 @@ write/migration failures, interrupt an active transaction, or lose a save reply.
 the exported production app. The tests assert visible setup, balances,
 rollback/retry, ownership handoff, and offline reopening after browser closure.
 
+Backup export downloads the versioned JSON contract described in
+[`finance-storage.md`](../../docs/finance-storage.md#product-backup-contract).
+Restore uses the browser's file picker and validates contents regardless of the
+file extension or reported MIME type. Candidate data is checked before an
+atomic replacement; failure leaves the existing local ledger available. The
+Chromium and disk-backed WebKit journeys cover real downloads, file selection,
+rejected candidates, valid round trips, rollback after replacement begins, and
+offline reopen followed by another write. Export and restore through Files in
+the installed iPhone app still need physical-device acceptance.
+
 The database uses product-specific OPFS paths and a Web Lock acquired before
 opening files. It never opens the probe's files. Startup preserves existing
 files and displays failures without a fallback ledger. Closing the database
@@ -93,16 +103,12 @@ No Cloudflare product deployment or storage migration was needed.
 
 ## Validation on 2026-11-07
 
-TypeScript, JavaScript syntax, and diff checks pass. All 18 Chromium/WebKit
-journeys passed, including interruption during an active transaction. The
-interruption test exercises visible Retry opening while Chromium releases the
-terminated worker's ownership lock, then verifies a single saved account.
-Standards and spec reviews found no actionable findings in the final test change.
-The app had no ESLint configuration. Expo's automatic lint setup failed its own
-version check; running the generated configuration directly reported the
-existing synchronous state reset in the startup effect (`index.tsx:54`). The
-automatically generated configuration and dependency changes were removed.
-Lint is not a passing check.
+The `npm exec --yes --package=pnpm@11.25.0 -- pnpm check` command passed lint,
+TypeScript, the static web build, and all 58 Chromium/WebKit journeys. This
+includes backup downloads and file selection, integrity and reference rejection,
+valid and repeated restores, rollback after replacement begins, and offline
+reopening followed by another write. Physical iPhone Files acceptance remains
+pending.
 
 Physical iPhone installation, offline reopening, and populated Safari ownership
 handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2
@@ -118,7 +124,9 @@ Kuwi uses the observed sequence and defaults with its own cream/sage layout and
 quokka artwork. This verifies usable setup transitions, not identical Tarsi
 animation timing or artwork. Blank-name validation and non-PHP precision still
 come from the separate shipped-web evidence, not new native observations.
-Backup/restore and later finance journeys remain work under the parent issue.
+Physical iPhone Files export and restore acceptance remains pending. The
+desktop browser journeys do not establish installed-app picker or download
+behavior.
 
 ## Vercel verification on 2026-11-07
 

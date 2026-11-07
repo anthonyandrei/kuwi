@@ -278,6 +278,305 @@ function state() {
   return first ? { ...first, accounts: accountList() } : null;
 }
 
+const backupFormat = "kuwi.backup";
+const backupVersion = 1;
+const backupSchemaVersion = 3;
+const backupCurrencies = { EUR: 2, GBP: 2, JPY: 0, PHP: 2, TWD: 2, USD: 2 };
+const backupCategories = [
+  ["food", "Food", 0],
+  ["transport", "Transport", 1],
+  ["phone", "Phone", 2],
+  ["bills", "Bills", 3],
+  ["shopping", "Shopping", 4],
+  ["entertainment", "Fun", 5],
+  ["health", "Health", 6],
+  ["fees", "Fees", 7],
+  ["other", "Other", 8],
+];
+
+/** Serialize JSON data with keys sorted recursively and array order retained.
+ * @param {*} value - JSON-compatible value to serialize.
+ * @returns {string} Canonical JSON text.
+ */
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object")
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+/** Hash a backup's format, version, schema version, and data with SHA-256.
+ * @param {object} body - The exact contract fields covered by the digest.
+ * @returns {Promise<string>} Lowercase hexadecimal SHA-256 digest.
+ */
+async function backupDigest(body) {
+  const bytes = new TextEncoder().encode(canonicalJson(body));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Snapshot every v3 source relation in deterministic order and attach its integrity digest.
+ * @returns {Promise<object>} A complete v1/v3 Kuwi backup envelope.
+ * @throws {Error} SQLite reads or Web Crypto digest generation fail.
+ */
+async function createBackup() {
+  const data = {
+    currencies: rows("SELECT code, decimal_places FROM currencies ORDER BY code"),
+    profiles: rows("SELECT id, preferred_name, preferred_currency FROM profiles ORDER BY id"),
+    accounts: rows("SELECT id, name, type, currency_code, credit_limit_minor, created_at FROM accounts ORDER BY id"),
+    accountAdjustments: rows("SELECT id, account_id, amount_minor, adjustment_type, created_at FROM account_adjustments ORDER BY id"),
+    setup: rows("SELECT id, profile_id, first_account_id, completed_at FROM setup ORDER BY id"),
+    pendingOperations: rows("SELECT id, account_id, operation_type, request_fingerprint, created_at FROM pending_operations ORDER BY id"),
+    categories: rows("SELECT id, label, sort_order FROM categories ORDER BY sort_order, id"),
+    expenses: rows("SELECT id, account_id, category_id, amount_minor, date, note, created_at FROM expenses ORDER BY id"),
+    pendingSyncOperations: rows("SELECT operation_id FROM pending_sync_operations ORDER BY operation_id"),
+  };
+  const body = { format: backupFormat, version: backupVersion, schemaVersion: backupSchemaVersion, data };
+  return {
+    ...body,
+    exportedAt: new Date().toISOString(),
+    integrity: { algorithm: "SHA-256", digest: await backupDigest(body) },
+  };
+}
+
+/** Reject values that cannot be stored as a nonempty SQLite text key or fact.
+ * @param {*} value - Candidate text value.
+ * @param {string} description - Relation and column used in the failure message.
+ * @returns {void} Resolves when the value is nonempty text.
+ * @throws {Error} The value is not nonempty text.
+ */
+function requireText(value, description) {
+  if (typeof value !== "string" || !value.trim())
+    throw Error(`Backup data constraints failed: ${description} must be nonempty text.`);
+}
+
+/** Ensure a relation contains only rows with the v3 contract's exact columns.
+ * @param {object} data - Candidate backup data object.
+ * @param {string} relation - Relation key in the backup.
+ * @param {string[]} fields - Required row property names.
+ * @returns {object[]} Validated relation rows.
+ * @throws {Error} The relation is absent or one row has missing or extra fields.
+ */
+function requireRows(data, relation, fields) {
+  const relationRows = data[relation];
+  if (!Array.isArray(relationRows))
+    throw Error(`Backup data constraints failed: ${relation} must be an array.`);
+  for (const row of relationRows) {
+    if (!row || typeof row !== "object" || Array.isArray(row) ||
+      Object.keys(row).sort().join("\0") !== [...fields].sort().join("\0"))
+      throw Error(`Backup data constraints failed: ${relation} has an invalid row shape.`);
+  }
+  return relationRows;
+}
+
+/** Check for nonempty, unique values in one relation's primary key.
+ * @param {object[]} rowsToCheck - Candidate rows in one relation.
+ * @param {string} key - Primary key column name.
+ * @param {string} relation - Relation name used in errors.
+ * @returns {Set<string>} The relation's validated key values.
+ * @throws {Error} A key is empty or duplicated.
+ */
+function requireUnique(rowsToCheck, key, relation) {
+  const seen = new Set();
+  for (const row of rowsToCheck) {
+    requireText(row[key], `${relation}.${key}`);
+    if (seen.has(row[key]))
+      throw Error(`Backup data constraints failed: ${relation} contains duplicate ${key} values.`);
+    seen.add(row[key]);
+  }
+  return seen;
+}
+
+/** Check an integer's safe range and optional lower bound before insertion.
+ * @param {*} value - Candidate SQLite integer.
+ * @param {string} description - Relation and column used in the failure message.
+ * @param {{nullable?: boolean, minimum?: number}} [options] - Nullability and inclusive minimum.
+ * @returns {void} Resolves when the value meets the requested range.
+ * @throws {Error} The value is not a safe integer or falls below the minimum.
+ */
+function requireInteger(value, description, { nullable = false, minimum = Number.MIN_SAFE_INTEGER } = {}) {
+  if (nullable && value === null) return;
+  if (!Number.isSafeInteger(value) || value < minimum)
+    throw Error(`Backup data constraints failed: ${description} is invalid.`);
+}
+
+/** Require a nonempty timestamp string while preserving SQLite's accepted text formats.
+ * @param {*} value - Candidate timestamp column value.
+ * @param {string} description - Relation and column used in the failure message.
+ * @returns {void} Resolves when the value is nonempty text.
+ * @throws {Error} The value is missing or not text.
+ */
+function requireTimestamp(value, description) {
+  requireText(value, description);
+}
+
+/** Validate the v1 envelope, row constraints, and references without changing live tables.
+ * @param {unknown} backup - Parsed candidate file contents.
+ * @returns {Promise<object>} The candidate's validated v3 relation rows.
+ * @throws {Error} The format, version, integrity digest, schema, constraints, or references fail.
+ */
+async function validateBackup(backup) {
+  if (!backup || typeof backup !== "object" || Array.isArray(backup) || backup.format !== backupFormat)
+    throw Error("This file is not a Kuwi backup.");
+  if (backup.version !== backupVersion || backup.schemaVersion !== backupSchemaVersion)
+    throw Error("This Kuwi backup uses an unsupported version.");
+  const expectedEnvelopeKeys = ["data", "exportedAt", "format", "integrity", "schemaVersion", "version"];
+  if (Object.keys(backup).sort().join("\0") !== expectedEnvelopeKeys.sort().join("\0"))
+    throw Error("Backup data constraints failed: the envelope has unsupported fields.");
+  if (!backup.integrity || backup.integrity.algorithm !== "SHA-256" ||
+    !/^[a-f0-9]{64}$/.test(backup.integrity.digest || ""))
+    throw Error("Backup integrity information is missing or unsupported.");
+  if (Object.keys(backup.integrity).sort().join("\0") !== ["algorithm", "digest"].join("\0"))
+    throw Error("Backup data constraints failed: integrity fields are unsupported.");
+  const body = {
+    format: backup.format,
+    version: backup.version,
+    schemaVersion: backup.schemaVersion,
+    data: backup.data,
+  };
+  if (await backupDigest(body) !== backup.integrity.digest)
+    throw Error("Backup integrity check failed. The file may be damaged or changed.");
+  if (typeof backup.exportedAt !== "string" || !Number.isFinite(Date.parse(backup.exportedAt)) ||
+    new Date(backup.exportedAt).toISOString() !== backup.exportedAt)
+    throw Error("Backup data constraints failed: exportedAt is invalid.");
+
+  const data = backup.data;
+  if (!data || typeof data !== "object" || Array.isArray(data) ||
+    Object.keys(data).sort().join("\0") !== ["accountAdjustments", "accounts", "categories", "currencies", "expenses", "pendingOperations", "pendingSyncOperations", "profiles", "setup"].sort().join("\0"))
+    throw Error("Backup data constraints failed: the data set is incomplete or unsupported.");
+  const currencies = requireRows(data, "currencies", ["code", "decimal_places"]);
+  const profiles = requireRows(data, "profiles", ["id", "preferred_name", "preferred_currency"]);
+  const accounts = requireRows(data, "accounts", ["id", "name", "type", "currency_code", "credit_limit_minor", "created_at"]);
+  const adjustments = requireRows(data, "accountAdjustments", ["id", "account_id", "amount_minor", "adjustment_type", "created_at"]);
+  const setupRows = requireRows(data, "setup", ["id", "profile_id", "first_account_id", "completed_at"]);
+  const operations = requireRows(data, "pendingOperations", ["id", "account_id", "operation_type", "request_fingerprint", "created_at"]);
+  const categories = requireRows(data, "categories", ["id", "label", "sort_order"]);
+  const expenses = requireRows(data, "expenses", ["id", "account_id", "category_id", "amount_minor", "date", "note", "created_at"]);
+  const pendingSync = requireRows(data, "pendingSyncOperations", ["operation_id"]);
+
+  if (currencies.length !== Object.keys(backupCurrencies).length ||
+    currencies.some(({ code, decimal_places }) => backupCurrencies[code] !== decimal_places))
+    throw Error("Backup data constraints failed: the currency definitions are unsupported.");
+  if (categories.length !== backupCategories.length || categories.some((category, index) =>
+    category.id !== backupCategories[index][0] || category.label !== backupCategories[index][1] || category.sort_order !== backupCategories[index][2]))
+    throw Error("Backup data constraints failed: the category definitions are unsupported.");
+
+  const currencyCodes = new Set(currencies.map(({ code }) => code));
+  const profileIds = requireUnique(profiles, "id", "profiles");
+  const accountIds = requireUnique(accounts, "id", "accounts");
+  requireUnique(adjustments, "id", "accountAdjustments");
+  requireUnique(operations, "id", "pendingOperations");
+  const categoryIds = requireUnique(categories, "id", "categories");
+  const expenseIds = requireUnique(expenses, "id", "expenses");
+  const pendingIds = requireUnique(pendingSync, "operation_id", "pendingSyncOperations");
+
+  if (profiles.length > 1 || (profiles.length === 1) !== (setupRows.length === 1) ||
+    (setupRows.length === 1) !== (accounts.length > 0))
+    throw Error("Backup data constraints failed: setup, profile, and accounts are inconsistent.");
+  for (const profile of profiles) {
+    requireText(profile.preferred_name, "profiles.preferred_name");
+    if (!currencyCodes.has(profile.preferred_currency))
+      throw Error("Backup reference check failed: profile currency is missing.");
+  }
+  for (const accountRow of accounts) {
+    requireText(accountRow.name, "accounts.name");
+    if (!currencyCodes.has(accountRow.currency_code))
+      throw Error("Backup reference check failed: account currency is missing.");
+    if (!["debit", "assets", "credit"].includes(accountRow.type))
+      throw Error("Backup data constraints failed: account type is unsupported.");
+    const credit = accountRow.type === "credit";
+    if (credit !== (accountRow.credit_limit_minor !== null))
+      throw Error("Backup data constraints failed: credit limit does not match account type.");
+    requireInteger(accountRow.credit_limit_minor, "accounts.credit_limit_minor", { nullable: !credit, minimum: 0 });
+    requireTimestamp(accountRow.created_at, "accounts.created_at");
+  }
+  for (const adjustment of adjustments) {
+    if (!accountIds.has(adjustment.account_id))
+      throw Error("Backup reference check failed: an account adjustment refers to a missing account.");
+    requireInteger(adjustment.amount_minor, "accountAdjustments.amount_minor");
+    if (adjustment.amount_minor === 0 || adjustment.adjustment_type !== "initial")
+      throw Error("Backup data constraints failed: account adjustment is invalid.");
+    requireTimestamp(adjustment.created_at, "accountAdjustments.created_at");
+  }
+  for (const setupRow of setupRows) {
+    if (setupRow.id !== 1 || !profileIds.has(setupRow.profile_id) || !accountIds.has(setupRow.first_account_id))
+      throw Error("Backup reference check failed: setup points to missing or unsupported records.");
+    requireTimestamp(setupRow.completed_at, "setup.completed_at");
+  }
+  for (const operation of operations) {
+    if (!accountIds.has(operation.account_id))
+      throw Error("Backup reference check failed: a pending account operation refers to a missing account.");
+    if (!["account.create", "account.update"].includes(operation.operation_type) ||
+      !/^[a-f0-9]{64}$/.test(operation.request_fingerprint))
+      throw Error("Backup data constraints failed: a pending account operation is invalid.");
+    requireTimestamp(operation.created_at, "pendingOperations.created_at");
+  }
+  for (const expense of expenses) {
+    if (!accountIds.has(expense.account_id) || !categoryIds.has(expense.category_id))
+      throw Error("Backup reference check failed: an expense refers to a missing account or category.");
+    requireInteger(expense.amount_minor, "expenses.amount_minor", { minimum: 1 });
+    if (!isValidDate(expense.date))
+      throw Error("Backup data constraints failed: an expense date is invalid.");
+    if (expense.note !== null && typeof expense.note !== "string")
+      throw Error("Backup data constraints failed: an expense note is invalid.");
+    requireTimestamp(expense.created_at, "expenses.created_at");
+  }
+  if (pendingIds.size !== expenseIds.size || [...pendingIds].some((id) => !expenseIds.has(id)))
+    throw Error("Backup reference check failed: an expense is missing its pending sync operation.");
+
+  return data;
+}
+
+/** Replace v3 records atomically; callers must validate the candidate before calling.
+ * @param {object} data - Complete v3 relations returned by `validateBackup`.
+ * @returns {void} Resolves after SQLite commits the replacement.
+ * @throws {Error} SQLite rejects a delete, insert, constraint, or commit.
+ */
+function replaceBackupData(data) {
+  transaction(() => {
+    db.exec(`
+      DELETE FROM pending_sync_operations;
+      DELETE FROM expenses;
+      DELETE FROM pending_operations;
+      DELETE FROM account_adjustments;
+      DELETE FROM setup;
+      DELETE FROM accounts;
+      DELETE FROM profiles;
+      DELETE FROM categories;
+      DELETE FROM currencies;
+    `);
+    /** Insert already-validated rows using fixed table and column names. */
+    const insertRows = (table, columns, values) => {
+      for (const row of values) {
+        db.exec({
+          sql: `INSERT INTO ${table}(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})`,
+          bind: columns.map((column) => row[column]),
+        });
+      }
+    };
+    insertRows("currencies", ["code", "decimal_places"], data.currencies);
+    insertRows("profiles", ["id", "preferred_name", "preferred_currency"], data.profiles);
+    insertRows("categories", ["id", "label", "sort_order"], data.categories);
+    insertRows("accounts", ["id", "name", "type", "currency_code", "credit_limit_minor", "created_at"], data.accounts);
+    insertRows("account_adjustments", ["id", "account_id", "amount_minor", "adjustment_type", "created_at"], data.accountAdjustments);
+    insertRows("setup", ["id", "profile_id", "first_account_id", "completed_at"], data.setup);
+    insertRows("pending_operations", ["id", "account_id", "operation_type", "request_fingerprint", "created_at"], data.pendingOperations);
+    insertRows("expenses", ["id", "account_id", "category_id", "amount_minor", "date", "note", "created_at"], data.expenses);
+    insertRows("pending_sync_operations", ["operation_id"], data.pendingSyncOperations);
+  });
+}
+
+/** Validate a complete backup, atomically replace the store, and return its setup.
+ * @param {unknown} backup - Parsed candidate file contents.
+ * @returns {Promise<object|null>} Restored setup and derived accounts, or null for an empty backup.
+ * @throws {Error} Validation or replacement fails; a failed write rolls back the old store.
+ */
+async function restoreBackup(backup) {
+  const data = await validateBackup(backup);
+  replaceBackupData(data);
+  return state();
+}
+
 /**
  * Return one account, built-in categories, and that account's expense history.
  * @param {string} [accountId] - Account ID; omitted to use the setup account.
@@ -551,9 +850,9 @@ async function complete(args) {
   });
 }
 
-/**
- * Run one queued storage command, posting its result or error to the requesting page.
- * @param {object} message - Worker request with response ID, command, and optional args.
+/** Run one queued storage command and post its result or error to the requesting page.
+ * @param {object} message - Worker request with response ID, supported command, and optional args.
+ * @returns {Promise<void>} Resolves after the response is posted; command failures are returned as errors.
  */
 async function dispatch({ id, command, args = {} }) {
   try {
@@ -572,6 +871,8 @@ async function dispatch({ id, command, args = {} }) {
     else if (command === "account.update") result = await updateAccount(args);
     else if (command === "createExpense") result = createExpense(args);
     else if (command === "complete") result = await complete(args);
+    else if (command === "exportBackup") result = await createBackup();
+    else if (command === "restoreBackup") result = await restoreBackup(args.backup);
     else throw Error("Unknown database operation.");
     self.postMessage({ id, result });
   } catch (error) {
