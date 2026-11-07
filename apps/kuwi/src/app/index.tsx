@@ -10,7 +10,14 @@ import {
   View,
 } from "react-native";
 import Animated, { FadeIn, ReduceMotion } from "react-native-reanimated";
-import { closeDatabase, database, type Setup } from "../storage/client";
+import {
+  closeDatabase,
+  database,
+  type Account,
+  type ExpenseLedger,
+  type Setup,
+} from "../storage/client";
+import { ExpenseWorkspace } from "../expenses/ExpenseWorkspace";
 const currencies = [
   ["PHP", "Philippine Peso"],
   ["USD", "US Dollar"],
@@ -22,7 +29,50 @@ const currencies = [
 const cream = "#f9f5eb",
   ink = "#293c32",
   sage = "#486b51";
-/** Render local setup and the first saved account; storage failures always stay visible. */
+
+/** Return fraction digits for the currencies currently offered by Kuwi. */
+function decimalPlaces(currency: string) {
+  return currency === "JPY" ? 0 : 2;
+}
+
+/** Convert stored minor units into editable decimal text without rounding. */
+function amountText(amountMinor: number, currency: string) {
+  const scale = 10 ** decimalPlaces(currency);
+  const whole = Math.floor(amountMinor / scale).toString();
+  if (scale === 1) return whole;
+  return `${whole}.${(amountMinor % scale).toString().padStart(2, "0")}`;
+}
+
+/** Parse nonnegative decimal text into safe integer minor units, or return null if invalid. */
+function amountMinor(text: string, currency: string) {
+  const digits = decimalPlaces(currency);
+  const expression = digits === 0 ? /^\d+$/ : /^\d+(\.\d{0,2})?$/;
+  if (!expression.test(text)) return null;
+  const [whole, fraction = ""] = text.split(".");
+  const amount = Number(whole) * 10 ** digits + Number(fraction.padEnd(digits, "0"));
+  return Number.isSafeInteger(amount) ? amount : null;
+}
+
+/** Apply the recovered web input behavior: strip signs and truncate excess decimals. */
+function cleanAmountInput(text: string, currency: string) {
+  const digits = decimalPlaces(currency);
+  const pieces = text.replace(/[^\d.]/g, "").split(".");
+  const whole = pieces[0] || "0";
+  if (digits === 0 || pieces.length === 1) return whole;
+  return `${whole}.${pieces.slice(1).join("").slice(0, digits)}`;
+}
+
+/** Format stored minor units for account display using the selected currency's precision. */
+function formatMoney(amount: number, currency: string) {
+  return new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency,
+  }).format(amount / 10 ** decimalPlaces(currency));
+}
+
+type AccountForm = { mode: "create" } | { mode: "edit"; account: Account };
+
+/** Render local setup and manage saved accounts; storage failures always stay visible. */
 export default function Home() {
   const [saved, setSaved] = useState<Setup | null>(null),
     [phase, setPhase] = useState("loading");
@@ -33,12 +83,22 @@ export default function Home() {
   const [calculator, setCalculator] = useState(false);
   const [intro, setIntro] = useState(0);
   const [awake, setAwake] = useState(false);
-  const [celebrating, setCelebrating] = useState(false);
   const [step, setStep] = useState(0),
     [error, setError] = useState(""),
     [saving, setSaving] = useState(false);
+  const [accountForm, setAccountForm] = useState<AccountForm | null>(null);
+  const [accountName, setAccountName] = useState("");
+  const [accountType, setAccountType] = useState<Account["type"]>("debit");
+  const [accountCurrency, setAccountCurrency] = useState("PHP");
+  const [accountBalance, setAccountBalance] = useState("0");
+  const [creditLimit, setCreditLimit] = useState("0");
+  const [creditOwedEnabled, setCreditOwedEnabled] = useState(false);
+  const [operation, setOperation] = useState<{ key: string; id: string } | null>(null);
+  const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
+  const [expenseLedger, setExpenseLedger] = useState<ExpenseLedger | null>(null);
+  const [expenseMode, setExpenseMode] = useState<"expense" | "history" | null>(null);
   /**
-   * Replace the worker and read canonical setup, updating saved data and phase.
+   * Reopen the worker and read canonical setup, updating saved data and phase.
    * Resolves after startup succeeds or its failure is displayed; callers reset
    * loading/error state before an explicit retry.
    */
@@ -47,7 +107,7 @@ export default function Home() {
       .then(() => database("state"))
       .then(
         (state) => {
-          setSaved(state);
+          setSaved(state as Setup | null);
           setPhase("ready");
         },
         (failure: Error) => {
@@ -65,7 +125,112 @@ export default function Home() {
           setError("Offline caching failed. Stay online and reload to retry."),
         );
   }, []);
-  /** Validate decimal text, convert to the selected currency’s integer minor units, and commit setup atomically. */
+
+  /** Open a clean creation form or populate the editor from the selected account. */
+  function editAccount(account?: Account) {
+    setError("");
+    setOperation(null);
+    if (account) {
+      setAccountForm({ mode: "edit", account });
+      setAccountName(account.name);
+      setAccountType(account.type);
+      setAccountCurrency(account.currency_code);
+      setAccountBalance(amountText(account.balance_minor, account.currency_code));
+      setCreditLimit(
+        account.credit_limit_minor === null
+          ? "0"
+          : amountText(account.credit_limit_minor, account.currency_code),
+      );
+      setCreditOwedEnabled(account.balance_minor > 0);
+      return;
+    }
+    setAccountForm({ mode: "create" });
+    setAccountName("");
+    setAccountType("debit");
+    setAccountCurrency(saved?.preferred_currency || "PHP");
+    setAccountBalance("0");
+    setCreditLimit("0");
+    setCreditOwedEnabled(false);
+  }
+
+  /**
+   * Reuse the current operation ID for an unchanged retry, or create a new one when input changes.
+   * @param command - Database write command included in the retry identity.
+   * @param payload - Normalized form fields included in the retry identity.
+   * @returns The stable ID the database uses to deduplicate this submission.
+   */
+  function operationId(command: string, payload: object) {
+    const key = JSON.stringify([command, payload]);
+    if (!operation || operation.key !== key) {
+      const next = { key, id: crypto.randomUUID() };
+      setOperation(next);
+      return next.id;
+    }
+    return operation.id;
+  }
+
+  /**
+   * Validate form text, save the account command, and reload committed SQLite state.
+   * The operation ID survives a failed response while the normalized content is unchanged.
+   * Storage and validation errors stay visible in the form.
+   */
+  async function saveAccount() {
+    if (!saved || !accountForm) return;
+    const name = accountName.trim();
+    if (!name) {
+      setError("Please enter an account name.");
+      return;
+    }
+    const balance = amountMinor(accountBalance, accountCurrency);
+    const limit = accountType === "credit" ? amountMinor(creditLimit, accountCurrency) : null;
+    if (balance === null || (accountType === "credit" && limit === null)) {
+      setError("Enter an amount with at most two decimal places (whole numbers for JPY).");
+      return;
+    }
+    const payload = {
+      ...(accountForm.mode === "edit" ? { accountId: accountForm.account.id } : {}),
+      name,
+      type: accountType,
+      currency: accountCurrency,
+      balanceMinor: accountType === "credit" && !creditOwedEnabled ? 0 : balance,
+      ...(accountType === "credit" ? { creditLimitMinor: limit } : {}),
+    };
+    const command = accountForm.mode === "create" ? "account.create" : "account.update";
+    const operationKey = operationId(command, payload);
+    setSaving(true);
+    setError("");
+    try {
+      await database(command, { ...payload, operationId: operationKey });
+      const state = (await database("state")) as Setup | null;
+      setSaved(state);
+      if (selectedAccount) {
+        setSelectedAccount(
+          state?.accounts.find((account) => account.id === selectedAccount.id) ?? null,
+        );
+      }
+      setAccountForm(null);
+      setOperation(null);
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+  /** Open the expense form or account history with its canonical local ledger. */
+  async function openExpenseWorkspace(mode: "expense" | "history") {
+    if (!selectedAccount) return;
+    setError("");
+    try {
+      const ledger = await database<ExpenseLedger>("ledger", {
+        accountId: selectedAccount.id,
+      });
+      setExpenseLedger(ledger);
+      setExpenseMode(mode);
+    } catch (failure) {
+      setError((failure as Error).message);
+    }
+  }
+  /** Validate onboarding amounts and commit setup through the worker's atomic command. */
   async function finish() {
     const digits = currency === "JPY" ? 0 : 2;
     if (!(digits === 0 ? /^\d+$/ : /^\d+(\.\d{0,2})?$/).test(amount)) {
@@ -85,14 +250,14 @@ export default function Home() {
     setError("");
     try {
       setSaved(
-        await database("complete", {
+        (await database("complete", {
           name,
           account,
           currency,
           amountMinor: minor,
-        }),
+          operationId: "setup:first",
+        })) as Setup | null,
       );
-      setCelebrating(true);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -207,30 +372,197 @@ export default function Home() {
         ) : saved ? (
           <View style={s.content}>
             <Text style={s.title}>Welcome, {saved.preferred_name}.</Text>
-            <Text style={s.copy}>
-              {celebrating
-                ? "Your first account is ready. A little clarity starts here."
-                : "Your first account is ready."}
-            </Text>
-            {celebrating
-              ? button("See my account", () => setCelebrating(false))
-              : null}
-            <View style={s.account}>
-              <Text style={s.label}>{saved.account_name}</Text>
-              <Text style={s.balance}>
-                {new Intl.NumberFormat("en-PH", {
-                  style: "currency",
-                  currency: saved.currency_code,
-                }).format(
-                  saved.opening_balance_minor /
-                    (saved.currency_code === "JPY" ? 1 : 100),
+            {expenseMode && expenseLedger ? (
+              <ExpenseWorkspace
+                mode={expenseMode}
+                ledger={expenseLedger}
+                onBack={() => setExpenseMode(null)}
+                onLedgerChange={(next) => {
+                  setExpenseLedger(next);
+                  setSelectedAccount(next.account);
+                  setSaved((current) => current ? {
+                    ...current,
+                    accounts: current.accounts.map((item) =>
+                      item.id === next.account.id ? next.account : item,
+                    ),
+                  } : current);
+                }}
+              />
+            ) : accountForm ? (
+              <View style={s.form}>
+                <Text accessibilityRole="header" style={s.sectionTitle}>
+                  {accountForm.mode === "create" ? "New account" : "Edit account"}
+                </Text>
+                <Text style={s.label}>Account name</Text>
+                <TextInput
+                  accessibilityLabel="Account name"
+                  value={accountName}
+                  onChangeText={setAccountName}
+                  style={s.input}
+                />
+                {accountForm.mode === "create" ? (
+                  <>
+                    <Text style={s.label}>Account type</Text>
+                    <View style={s.typeOptions}>
+                      {(["debit", "assets", "credit"] as const).map((type) => (
+                        <Pressable
+                          key={type}
+                          accessibilityRole="radio"
+                          accessibilityState={{ checked: accountType === type }}
+                          accessibilityLabel={type === "assets" ? "Assets" : type === "credit" ? "Credit" : "Debit"}
+                          onPress={() => {
+                            setAccountType(type);
+                            setAccountBalance("0");
+                            setCreditOwedEnabled(false);
+                          }}
+                          style={[s.typeOption, accountType === type && s.typeSelected]}
+                        >
+                          <Text style={s.label}>{type === "assets" ? "Assets" : type === "credit" ? "Credit" : "Debit"}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </>
+                ) : null}
+                <Text style={s.label}>Currency</Text>
+                <View style={s.currencyOptions}>
+                  {currencies.map(([code, label]) => (
+                    <Pressable
+                      key={code}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${code} ${label}`}
+                      accessibilityState={{ selected: accountCurrency === code }}
+                      disabled={accountForm.mode === "edit" && Boolean(accountForm.account.has_activity)}
+                      onPress={() => {
+                        setAccountCurrency(code);
+                        setAccountBalance((value) => cleanAmountInput(value, code));
+                        setCreditLimit((value) => cleanAmountInput(value, code));
+                      }}
+                      style={[
+                        s.currencyOption,
+                        accountCurrency === code && s.typeSelected,
+                        accountForm.mode === "edit" && accountForm.account.has_activity ? s.disabled : null,
+                      ]}
+                    >
+                      <Text style={s.label}>{code}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+                {accountType === "credit" ? (
+                  <>
+                    <Text style={s.label}>Credit limit ({accountCurrency})</Text>
+                    <TextInput
+                      accessibilityLabel={`Credit limit (${accountCurrency})`}
+                      value={creditLimit}
+                      onChangeText={(value) => setCreditLimit(cleanAmountInput(value, accountCurrency))}
+                      keyboardType="decimal-pad"
+                      style={s.input}
+                    />
+                    {accountForm.mode === "create" ? (
+                      <>
+                        {button(creditOwedEnabled ? "Remove current balance" : "Add current balance", () => {
+                          setCreditOwedEnabled(!creditOwedEnabled);
+                          if (!creditOwedEnabled) setAccountBalance("0");
+                        })}
+                        {creditOwedEnabled ? (
+                          <>
+                            <Text style={s.label}>Current balance ({accountCurrency})</Text>
+                            <TextInput
+                              accessibilityLabel={`Current balance (${accountCurrency})`}
+                              value={accountBalance}
+                              onChangeText={(value) => setAccountBalance(cleanAmountInput(value, accountCurrency))}
+                              keyboardType="decimal-pad"
+                              style={s.input}
+                            />
+                          </>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <Text style={s.label}>Opening balance ({accountCurrency})</Text>
+                    <TextInput
+                      accessibilityLabel={`Opening balance (${accountCurrency})`}
+                      value={accountBalance}
+                      onChangeText={(value) => setAccountBalance(cleanAmountInput(value, accountCurrency))}
+                      keyboardType="decimal-pad"
+                      editable={accountForm.mode === "create" || !accountForm.account.has_activity}
+                      style={[s.input, accountForm.mode === "edit" && Boolean(accountForm.account.has_activity) && s.lockedInput]}
+                    />
+                  </>
                 )}
-              </Text>
-            </View>
-            <Text style={s.copy}>
-              Saved on this device. No sign-in required.
-            </Text>
-            {button("Close database", () => void close())}
+                {button(
+                  saving ? "Saving…" : accountForm.mode === "create" ? "Save account" : "Save changes",
+                  () => void saveAccount(),
+                  saving,
+                )}
+                {button("Cancel", () => {
+                  setAccountForm(null);
+                  setError("");
+                  setOperation(null);
+                }, saving)}
+              </View>
+            ) : selectedAccount ? (
+              <View style={s.accountDetails}>
+                <Text accessibilityRole="header" style={s.sectionTitle}>
+                  {selectedAccount.name}
+                </Text>
+                <Text style={s.note}>
+                  {selectedAccount.type === "assets" ? "Assets" : selectedAccount.type === "credit" ? "Credit" : "Debit"} account
+                </Text>
+                <Text style={s.label}>Balance</Text>
+                <Text style={s.accountBalance}>
+                  {formatMoney(selectedAccount.balance_minor, selectedAccount.currency_code)}
+                </Text>
+                <Text style={s.note}>Currency {selectedAccount.currency_code}</Text>
+                {selectedAccount.type === "credit" && selectedAccount.credit_limit_minor !== null ? (
+                  <Text style={s.note}>
+                    Credit limit {formatMoney(selectedAccount.credit_limit_minor, selectedAccount.currency_code)}
+                  </Text>
+                ) : null}
+                {button("Add expense", () => void openExpenseWorkspace("expense"))}
+                {button("Transaction history", () => void openExpenseWorkspace("history"))}
+                {button("Edit account details", () => editAccount(selectedAccount))}
+                {button("Back to accounts", () => setSelectedAccount(null))}
+              </View>
+            ) : (
+              <View style={s.accounts}>
+                <Text accessibilityRole="header" style={s.sectionTitle}>Your accounts</Text>
+                {(saved.accounts || []).map((account) => (
+                  <View key={account.id} style={s.account}>
+                    <View style={s.accountHeading}>
+                      <View style={s.accountCopy}>
+                        <Text style={s.label}>{account.name}</Text>
+                        <Text style={s.note}>{account.type === "assets" ? "Assets" : account.type === "credit" ? "Credit" : "Debit"} / {account.currency_code}</Text>
+                      </View>
+                      <Text style={s.accountBalance}>{formatMoney(account.balance_minor, account.currency_code)}</Text>
+                    </View>
+                    {account.type === "credit" && account.credit_limit_minor !== null ? (
+                      <Text style={s.note}>Credit limit {formatMoney(account.credit_limit_minor, account.currency_code)}</Text>
+                    ) : null}
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`View account ${account.name}`}
+                      onPress={() => setSelectedAccount(account)}
+                      style={s.editButton}
+                    >
+                      <Text style={s.editButtonText}>View account</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Edit account ${account.name}`}
+                      onPress={() => editAccount(account)}
+                      style={s.editButton}
+                    >
+                      <Text style={s.editButtonText}>Edit account</Text>
+                    </Pressable>
+                  </View>
+                ))}
+                {button("Add account", () => editAccount())}
+                <Text style={s.note}>Saved on this device. No sign-in required.</Text>
+                {button("Close database", () => void close())}
+              </View>
+            )}
           </View>
         ) : (
           <View style={s.content}>
@@ -445,9 +777,29 @@ const s = StyleSheet.create({
   },
   account: {
     backgroundColor: "#e2e9d9",
-    padding: 24,
-    borderRadius: 16,
+    padding: 18,
+    borderRadius: 14,
     gap: 12,
   },
+  accounts: { gap: 16 },
+  form: { gap: 14 },
+  accountDetails: { gap: 12 },
+  sectionTitle: { fontSize: 24, lineHeight: 30, fontWeight: "700", color: ink },
+  accountHeading: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  accountCopy: { flex: 1, gap: 5 },
+  accountBalance: { fontSize: 19, fontWeight: "700", color: ink, fontVariant: ["tabular-nums"] },
+  editButton: { alignSelf: "flex-start", paddingVertical: 8, paddingHorizontal: 12, borderRadius: 10, backgroundColor: "#f9f5eb" },
+  editButtonText: { color: sage, fontSize: 14, fontWeight: "700" },
+  typeOptions: { flexDirection: "row", gap: 8 },
+  typeOption: { flex: 1, alignItems: "center", paddingVertical: 12, borderRadius: 12, borderWidth: 1, borderColor: "#83927e", backgroundColor: "#fffdf7" },
+  typeSelected: { borderColor: sage, borderWidth: 2, backgroundColor: "#e2e9d9" },
+  currencyOptions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  currencyOption: { minWidth: 54, alignItems: "center", paddingVertical: 10, paddingHorizontal: 12, borderRadius: 11, borderWidth: 1, borderColor: "#83927e", backgroundColor: "#fffdf7" },
+  lockedInput: { opacity: 0.65, backgroundColor: "#e2e9d9" },
   balance: { fontSize: 36, fontWeight: "600", color: ink },
 });
