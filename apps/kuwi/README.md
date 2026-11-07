@@ -8,21 +8,25 @@ From the repository root:
 
 ```sh
 pnpm install
-pnpm --filter @kuwi/app typecheck
-pnpm --filter @kuwi/app build
-cd apps/kuwi
-node scripts/serve.mjs
+pnpm check
+node apps/kuwi/scripts/serve.mjs
 ```
 
 Open http://127.0.0.1:4183. The static export includes the worker, pinned SQLite
 WASM, manifest, icons, and a service worker that caches startup files. Expo's
 development server does not produce the offline installation bundle.
 
-After building, run the product journeys from `apps/kuwi`:
+`pnpm check` runs the configured lint, TypeScript, static build, and all product
+browser journeys. CI runs the same command on pushes and pull requests. It does
+not deploy. On a new machine, install browsers first:
 
 ```sh
-pnpm exec playwright test --config playwright.config.mjs
+pnpm exec playwright install chromium webkit
 ```
+
+After building, rerun the product journeys from the repository root with
+`pnpm test`. The server resolves its export relative to its script, so it also
+works when launched from the app directory.
 
 Tests use real OPFS, an independent loopback origin for each journey, and disk
 profiles for WebKit. A local test server can alter the served worker to inject
@@ -64,6 +68,13 @@ Anthony selected Vercel on 2026-11-07. The Kuwi project belongs to
 The first deployment became production despite an explicit preview target;
 no existing deployment was replaced. Later deployments should use preview
 unless promotion is explicitly intended.
+
+Before any deployment, verify the authenticated Vercel account, the selected
+scope, and the linked project against the values above. Confirm that the user's
+approval covers that destination and preview or production target. Check the
+returned deployment metadata for its actual target before sharing the URL.
+If the target differs, report it and stop further publication until resolved;
+a successful upload alone does not prove that a preview was created.
 
 `vercel.json` defines the workspace build and output directory. To upload
 only a locally built static export:
@@ -139,3 +150,51 @@ A subsequent run saved Anthony and Cash at PHP 0.00 in Safari, duplicated the
 tab, verified Database busy, closed the owner tab, and retried. The second tab
 opened the saved account without repeating setup. Populated Safari handoff
 therefore passed.
+
+## iOS testing
+
+Before requesting manual phone work, check the local tools and runtimes:
+
+```sh
+xcode-select -p
+xcrun simctl list runtimes
+xcrun simctl list devices available
+```
+
+Use an existing iOS runtime and device when available. If none is installed,
+inspect `xcodebuild -help` for the supported download options,
+then select one compatible runtime explicitly with
+`xcodebuild -downloadPlatform iOS -buildVersion <version> -architectureVariant arm64`. Inspect the result before retrying;
+a usable runtime does not need another download. Boot the selected device with
+`xcrun simctl boot <device-UDID>` and wait with
+`xcrun simctl bootstatus <device-UDID> -b`.
+
+Discover the installed simulator application under the selected Xcode bundle.
+On the verified Xcode 27.2 installation it was DeviceHub.app under
+`Contents/Applications`, rather than the older Simulator.app path. Use the UI
+control tool for interaction. In the device Keyboard menu, enable the software
+keyboard with a focused input; check Keyboard Capture and Simulate Hardware
+Keyboard when typing or clicks behave unexpectedly. Let the screen settle
+before judging a transition.
+
+Use a fresh Simulator Safari store for the setup journey. Check the name field
+with the software keyboard open, keyboard Next and dismissal, currency-list
+scrolling, the decimal keyboard, and the custom number pad's Done button.
+Save and reopen the account. Record the runtime/build, device, URL, and observed
+results against the issue criteria. Chromium/WebKit automation covers storage
+recovery and persistence but does not establish iOS keyboard behavior.
+
+Use a physical iPhone for Add to Home Screen installation and a full app closure
+followed by offline reopening from its icon. Preserve existing saved accounts.
+Try the available Mirroring controls before requesting user action; explain the
+specific check that requires the phone when a manual step remains necessary.
+Restore connectivity after an offline check. Simulator observations do not
+replace this physical installation evidence.
+
+## Checks after the session retro
+
+Lint now uses a committed Expo flat configuration and pinned dependencies,
+invoked directly through ESLint. Startup uses its existing initial loading state;
+explicit retries reset loading and error state in the button handler. This
+removes the synchronous state reset from the startup effect. The earlier lint
+gap above records the original issue-closure state.

@@ -1,8 +1,8 @@
 import http from "node:http";
 import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolve, extname } from "node:path";
-const root = resolve("dist");
+const root = resolve(fileURLToPath(new URL("../dist/", import.meta.url)));
 const mime = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -13,7 +13,8 @@ const mime = {
   ".css": "text/css",
 };
 /**
- * Serve dist on loopback. Port zero selects an available port.
+ * Serve this app's dist on loopback regardless of the caller's directory.
+ * Port zero selects an available port.
  * The optional response transform supports server-side fault injection in tests;
  * the CLI serves unchanged files. Callers own closing the returned HTTP server.
  */

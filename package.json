@@ -5,7 +5,12 @@
   "scripts": {
     "storage:dev": "node prototypes/storage-pwa/server.mjs",
     "storage:build": "node prototypes/storage-pwa/build.mjs",
-    "storage:test": "playwright test --config prototypes/storage-pwa/playwright.config.mjs"
+    "storage:test": "playwright test --config prototypes/storage-pwa/playwright.config.mjs",
+    "lint": "pnpm --filter @kuwi/app lint",
+    "typecheck": "pnpm --filter @kuwi/app typecheck",
+    "build": "pnpm --filter @kuwi/app build",
+    "test": "playwright test --config apps/kuwi/playwright.config.mjs",
+    "check": "pnpm lint && pnpm typecheck && pnpm build && pnpm test"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",

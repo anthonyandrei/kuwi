@@ -37,18 +37,24 @@ export default function Home() {
   const [step, setStep] = useState(0),
     [error, setError] = useState(""),
     [saving, setSaving] = useState(false);
-  /** Read canonical setup; retry startup with a fresh worker after any failure. */
-  async function load() {
-    setPhase("loading");
-    setError("");
-    try {
-      await closeDatabase();
-      setSaved(await database("state"));
-      setPhase("ready");
-    } catch (e) {
-      setError((e as Error).message);
-      setPhase("error");
-    }
+  /**
+   * Replace the worker and read canonical setup, updating saved data and phase.
+   * Resolves after startup succeeds or its failure is displayed; callers reset
+   * loading/error state before an explicit retry.
+   */
+  function load() {
+    return closeDatabase()
+      .then(() => database("state"))
+      .then(
+        (state) => {
+          setSaved(state);
+          setPhase("ready");
+        },
+        (failure: Error) => {
+          setError(failure.message);
+          setPhase("error");
+        },
+      );
   }
   useEffect(() => {
     void load();
@@ -192,7 +198,11 @@ export default function Home() {
             <Text style={s.copy}>
               Your existing storage stays on this device.
             </Text>
-            {button("Retry opening", () => void load())}
+            {button("Retry opening", () => {
+              setPhase("loading");
+              setError("");
+              void load();
+            })}
           </View>
         ) : saved ? (
           <View style={s.content}>

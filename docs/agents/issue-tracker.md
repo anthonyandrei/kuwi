@@ -48,3 +48,26 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 - **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (see **Count open blockers**, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
 - **Claim**: `gh issue edit <n> --add-assignee @me`, the session's first write.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
+
+## Completion and review
+
+Before closing an issue:
+
+1. Read its current acceptance criteria and review all implementation changes for
+   the issue, including earlier commits. A review of the final incremental diff
+   alone does not establish completion.
+2. Run `pnpm check` on the final tree. Record the command and result. Fix failures
+   before claiming the required checks pass.
+3. Include this evidence table in the completion comment, with a row for every
+   acceptance criterion:
+
+   | Criterion | Evidence (test, file, or observed journey) | Result / remaining limitation |
+   | --- | --- | --- |
+   | Copy the criterion here | Link or command and observation | Passed, failed, or unverified |
+
+4. Distinguish automated browser evidence, Simulator observations, and physical
+   device results. Reference-app observations establish only what was observed;
+   screenshots alone cannot establish behavior or timing.
+5. Resolve failed or unverified criteria before closure, or obtain explicit
+   approval for a documented scope change. Include remaining work and its owning
+   issue. Apply the account-routing and write-approval rules before publishing.

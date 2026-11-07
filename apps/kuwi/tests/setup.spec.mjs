@@ -1,10 +1,12 @@
 import { test as base, expect, webkit, chromium } from "@playwright/test";
 import { startServer } from "../scripts/serve.mjs";
 const test = base.extend({
-  storageFault: async ({}, use) => {
-    await use({ current: null, disableCache: false });
+  /** Provide mutable fault controls isolated to this journey. */
+  storageFault: async ({}, provide) => {
+    await provide({ current: null, disableCache: false });
   },
-  baseURL: async ({ storageFault }, use) => {
+  /** Provide an independent origin with worker fault injection; close its server afterward. */
+  baseURL: async ({ storageFault }, provide) => {
     const server = startServer(0, (path, bytes) => {
       if (path === "/sw.js" && storageFault.disableCache) return "";
       if (path !== "/db-worker.js" || !storageFault.current) return bytes;
@@ -35,13 +37,14 @@ const test = base.extend({
     });
     await new Promise((resolve) => server.once("listening", resolve));
     try {
-      await use(`http://127.0.0.1:${server.address().port}`);
+      await provide(`http://127.0.0.1:${server.address().port}`);
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     }
   },
-  context: async ({ browser, browserName, baseURL }, use, testInfo) => {
+  /** Provide disk-backed WebKit storage or a Chromium context; close it after the journey. */
+  context: async ({ browser, browserName, baseURL }, provide, testInfo) => {
     const context =
       browserName === "webkit"
         ? await webkit.launchPersistentContext(testInfo.outputPath("profile"), {
@@ -49,7 +52,7 @@ const test = base.extend({
           })
         : await browser.newContext({ baseURL });
     try {
-      await use(context);
+      await provide(context);
     } finally {
       await context.close();
     }
