@@ -14,7 +14,7 @@ import type { ExpenseLedger } from "../storage/client";
 const ink = "#293c32";
 const sage = "#486b51";
 
-/** Format exact minor units using the currency precision stored with the account. */
+/** Format minor units using the selected account's currency and decimal precision. */
 function formatMoney(minor: number, currency: string, digits: number): string {
   return new Intl.NumberFormat("en-PH", {
     style: "currency",
@@ -24,7 +24,13 @@ function formatMoney(minor: number, currency: string, digits: number): string {
   }).format(minor / 10 ** digits);
 }
 
-/** Render entry or history without exposing database internals to the form. */
+/**
+ * Render an expense form or saved history for one account.
+ * @param mode - Whether to show the entry form or history list.
+ * @param ledger - The selected account, category inventory, and saved expenses.
+ * @param onBack - Return to the selected account screen.
+ * @param onLedgerChange - Publish the refreshed ledger after a successful save.
+ */
 export function ExpenseWorkspace({
   mode,
   ledger,
@@ -46,7 +52,7 @@ export function ExpenseWorkspace({
   const { account } = ledger;
   const currency = account.currency_code;
 
-  /** Validate and save with one operation ID until a successful response arrives. */
+  /** Keep the operation ID across failures so a retry can recover a committed save. */
   async function submitExpense() {
     const dateError = validateExpenseDate(date, getLocalDate());
     const amountMinor = parseExpenseAmount(amount, account.decimal_places);

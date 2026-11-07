@@ -80,12 +80,12 @@ function stopWorker(error: Error) {
 }
 
 /**
- * Send one serialized database command and surface worker failures to the caller.
- * Writes time out after 15 seconds so the UI can offer the same operation ID for retry;
+ * Send a worker command and surface its result or failure to the caller.
+ * Writes time out after 15 seconds so callers can retry with the same operation ID;
  * reads wait up to 60 seconds for OPFS initialization.
- * @param command - A supported worker command.
- * @param args - Command-specific values passed to the dedicated worker.
- * @returns The command result, or a rejected promise when the worker reports or encounters an error.
+ * @param command - A supported setup, account, ledger, expense, or close command.
+ * @param args - Command-specific values sent to the dedicated database worker.
+ * @returns The typed command result; the promise rejects on worker errors or timeout.
  */
 export function database<T extends DatabaseResult = DatabaseResult>(
   command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "close",
@@ -126,8 +126,7 @@ export function database<T extends DatabaseResult = DatabaseResult>(
 
 /**
  * Close the database before releasing ownership for another tab.
- * Any call still waiting when the worker stops rejects with a close error.
- * @returns A promise that resolves after the worker releases database ownership.
+ * @returns A promise that resolves after ownership is released; a close failure rejects it.
  */
 export async function closeDatabase() {
   if (worker) {

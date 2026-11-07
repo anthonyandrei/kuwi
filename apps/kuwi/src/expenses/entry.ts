@@ -1,4 +1,9 @@
-/** Convert a strict decimal entry into the account currency's integer minor units. */
+/**
+ * Parse a positive decimal amount and round it to the account currency's minor units.
+ * @param input - Numeric amount text; commas are ignored before parsing.
+ * @param decimalPlaces - Number of minor-unit digits used by the account currency.
+ * @returns A positive safe integer amount in minor units, or null for invalid input.
+ */
 export function parseExpenseAmount(
   input: string,
   decimalPlaces: number,
@@ -12,7 +17,12 @@ export function parseExpenseAmount(
   return Number.isSafeInteger(minor) && minor > 0 ? minor : null;
 }
 
-/** Check a date-only value and keep ordinary expenses within the current ledger period. */
+/**
+ * Validate a real date-only value and reject dates after the supplied local date.
+ * @param value - Expense date in YYYY-MM-DD form.
+ * @param today - Current browser-local date in YYYY-MM-DD form.
+ * @returns A user-facing validation message, or null when the date is allowed.
+ */
 export function validateExpenseDate(value: string, today: string): string | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return "Choose a valid expense date.";
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -22,7 +32,10 @@ export function validateExpenseDate(value: string, today: string): string | null
   return null;
 }
 
-/** Return today's date in the user's local calendar, without UTC shifting. */
+/**
+ * Return today's date in the user's local calendar without UTC conversion.
+ * @returns Today's local date as YYYY-MM-DD.
+ */
 export function getLocalDate(): string {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;

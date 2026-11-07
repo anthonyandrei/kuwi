@@ -216,7 +216,11 @@ export default function Home() {
       setSaving(false);
     }
   }
-  /** Open the expense form or account history with its canonical local ledger. */
+  /**
+   * Load the selected account's local ledger before opening expense entry or history.
+   * @param mode - Workspace view to display after the ledger loads.
+   * On storage failure, keeps the current screen open and shows the error.
+   */
   async function openExpenseWorkspace(mode: "expense" | "history") {
     if (!selectedAccount) return;
     setError("");

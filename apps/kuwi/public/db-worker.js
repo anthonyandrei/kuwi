@@ -155,8 +155,9 @@ function migrateExpenses() {
 
 /**
  * Own the OPFS database lock for the connection lifetime and initialize SQLite.
- * Fresh creation and v1 migration happen before any command can read or write data.
- * Unsupported versions and migration errors leave the existing store intact.
+ * Fresh stores are upgraded through v3; stored v1 and v2 databases run each
+ * required migration before a command can read or write data. A failed step
+ * leaves that step's starting schema and records available for a later retry.
  * @throws {Error} OPFS or Web Locks is unavailable, another tab owns the database,
  *   the database version is unsupported, or initialization fails.
  */
@@ -208,10 +209,11 @@ async function open() {
 }
 
 /**
- * Read one account with its balance summed from adjustment facts.
- * `has_activity` currently means at least one adjustment row, including an initial row.
+ * Read one account with its balance derived from adjustments and posted expenses.
+ * Debit and asset expenses reduce the balance; credit expenses increase the amount owed.
+ * `has_activity` is true when the account has an adjustment or any expense.
  * @param {string} accountId - Account primary key.
- * @returns {object|null} Account fields and derived balance, or null when missing.
+ * @returns {object|null} Account details with currency precision and balance, or null when missing.
  */
 function account(accountId) {
   return rows(
@@ -229,8 +231,8 @@ function account(accountId) {
 }
 
 /**
- * List accounts in creation order with balances calculated from adjustment rows.
- * @returns {Array<object>} Account fields and derived balance for each saved account.
+ * List accounts in creation order with balances derived from adjustments and posted expenses.
+ * @returns {Array<object>} Saved account details, currency precision, and derived balances.
  */
 function accountList() {
   return rows(
@@ -276,7 +278,11 @@ function state() {
   return first ? { ...first, accounts: accountList() } : null;
 }
 
-/** Return one account with its category inventory and saved expense history. */
+/**
+ * Return one account, built-in categories, and that account's expense history.
+ * @param {string} [accountId] - Account ID; omitted to use the setup account.
+ * @returns {object|null} The account ledger, or null when the requested account is unavailable.
+ */
 function readLedger(accountId) {
   const firstAccountId = rows("SELECT first_account_id FROM setup WHERE id=1")[0]?.first_account_id;
   const selectedAccount = account(accountId || firstAccountId);
@@ -296,13 +302,20 @@ function readLedger(accountId) {
   };
 }
 
-/** Format the browser's local calendar date for date-only financial entries. */
+/**
+ * Format today's browser-local calendar date for date-only financial entries.
+ * @returns {string} The local date as YYYY-MM-DD.
+ */
 function localDate() {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-/** Accept only real YYYY-MM-DD dates, excluding timezone-dependent parsing. */
+/**
+ * Check a date-only value without relying on local-time parsing.
+ * @param {unknown} value - Candidate YYYY-MM-DD date.
+ * @returns {boolean} Whether the value is a real calendar date in that format.
+ */
 function isValidDate(value) {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value))
     return false;
@@ -311,7 +324,14 @@ function isValidDate(value) {
     parsed.toISOString().slice(0, 10) === value;
 }
 
-/** Save one posted expense and its pending sync operation in one transaction. */
+/**
+ * Save one current or past expense and its pending sync marker atomically.
+ * The operation ID is also the expense ID. Identical retries return the saved
+ * ledger; reuse with different account, category, amount, date, or note fails.
+ * @param {object} args - Expense operation ID, account/category IDs, positive minor units, date, and optional note.
+ * @returns {{ledger: object, replayed: boolean}} The refreshed account ledger and whether this was a retry.
+ * @throws {Error} Invalid fields, unavailable references, a conflicting retry, or a failed database write.
+ */
 function createExpense(args) {
   const operationId = args.operationId?.trim();
   const accountId = args.accountId;
