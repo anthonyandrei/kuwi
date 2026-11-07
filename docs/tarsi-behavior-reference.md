@@ -204,6 +204,8 @@ bounded Kuwi entry.
 For an eligible ordinary income, the store posts only when the date is today or
 earlier and the income is not planned. The balance helper adds income to Debit
 and Asset balances and subtracts it from the amount owed on Credit accounts.
+The inspected code does not establish whether another process changes a
+planned entry to posted when its date arrives.
 The ordinary income form itself exposes Debit and Credit accounts. Its currency
 rounding helper uses the account currency: PHP 12.345 rounds to 12.35 and JPY
 12.5 rounds to 13. As a calculation example, PHP 1,000 plus a same-day income

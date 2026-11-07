@@ -816,7 +816,8 @@ function createExpense(args) {
  * The operation ID is also the income ID. Future dates are planned and do not
  * affect the balance; only those entries may have a zero amount. Identical
  * retries return the saved ledger, while changed content under the same ID fails.
- * @param {object} args - Operation ID, Debit/Credit account ID, optional category ID, nonnegative account-currency minor units, valid date, and optional note.
+ * @param {object} args - Operation ID, Debit/Credit account ID, optional category ID,
+ *   nonnegative account-currency minor units, valid date, and optional note.
  * @returns {{ledger: object, replayed: boolean}} The refreshed ledger and whether this was a retry.
  * @throws {Error} Invalid fields, unavailable references, a conflicting retry, or a failed database write.
  */
