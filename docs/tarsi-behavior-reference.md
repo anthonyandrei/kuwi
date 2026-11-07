@@ -169,68 +169,105 @@ resolution. Evidence is static and platform-specific. No runtime validation,
 native comparison, minimum historical date, or linked-effect rule beyond the
 eligible cashback path is claimed.
 
-### Same-currency account transfers
+### Ordinary income entry
 
-Checked 2026-11-07 by static inspection of the shipped web transfer chunk,
-common-bundle modules 1685, 1701, 1709, and 1731, and the currency/transfer
-helpers loaded by the route. The [index bundle](https://web.tarsi.cloud/_expo/static/js/web/index-32d1e7797d0f640bdef7cc274d2a7443.js)
-maps `/(tabs)/transfer` to the
-[transfer chunk](https://web.tarsi.cloud/_expo/static/js/web/transfer-2dbf20b142412a934fd581303887e2c8.js),
-module 3409. Its SHA-256 is
-`31fad8f4a717e471749ccaa253a9029f3ed2a0e8ac3dda70e57e752c87ca8ac0`.
-The route calls the store action from module 1731 in the
-[common bundle](https://web.tarsi.cloud/_expo/static/js/web/__common-d31990bcc79fe8c4b0213bb913c4a7e9.js).
-That action uses account normalization and available-balance helpers from
-module 1709 and currency rounding from module 1701. The extracted common-bundle
-modules are retained under
-`/Users/drei/Library/Caches/kuwi-research/tarsi-focused-modules-20261107/`.
-The downloaded route chunk used for this pass was `/tmp/tarsi-transfer.js`.
+Checked 2026-11-07 from the shipped web `add-income` chunk, Metro module 2617,
+and common-bundle modules 1685, 1701, 1709, and 1730. The chunk is
+`add-income-c54847041456330b5c6bb44f04331180.js`, 75,087 bytes, with SHA-256
+`4ae172ffa99f05be1a4a840b8a9368b0f9154656eb686b4b7091aa7c95d5520e`. The cached
+index maps `./add-income.tsx` to this chunk. The route map, full direct module
+dependency list, source artifact, and REA 6.8.0 Evidence are retained in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-income-20261107/`; the REA
+Evidence ID is `ev_c54dd834bd8afceaee3b0e5fb9a5e6d8d0c875acbe3618f3b48a0991a4f0bac3`.
+This is a completed static parse of one file, with 22,839 AST nodes, 234
+findings, and no parse failures. It does not establish runtime behavior or
+iPhone 2.5.9 parity.
 
-The account-transfer branch requires a source and a distinct destination. Its
-source predicate accepts debit and credit accounts; the destination predicate
-accepts debit accounts. The form compares currencies to decide whether to show
-exchange-rate and received-amount fields. This ticket's same-currency path uses
-one amount for the source deduction and destination receipt. Asset accounts,
-external transfers, and cross-currency transfers are separate paths.
+The ordinary form starts with today's local date, no selected category, and the
+profile's preferred currency. It requires an account and a nonnegative amount.
+The amount must be positive for a current or past one-time entry. A future
+one-time date becomes planned, does not post to the balance, and permits a zero
+amount. A note is trimmed and omitted when blank. The category is optional; an
+unset category is stored without a category ID. The form's account picker
+includes Debit and Credit accounts. It converts from the selected currency to
+the account currency when they differ, using the app's available or manual
+conversion rate.
 
-The form rejects amounts at or below zero and fees below zero or not finite.
-Blank fees resolve to zero. The store rounds transfer and fee amounts using
-the source currency's minor-unit rule. The shipped currency helper uses zero
-fractional digits for JPY, KRW, and CLP, three for KWD, BHD, and OMR, and two
-for other currencies. Kuwi currently supports PHP, USD, EUR, GBP, TWD at two
-digits and JPY at zero. The transfer form's currency formatter removes
-non-numeric characters and truncates extra fractional digits to the selected
-currency precision.
+The built-in income categories are Salary (`salary`), Bonus (`bonus`),
+Freelance (`freelance`), Commission (`commission`), Business (`business`),
+Side Hustle (`side-hustle`), Allowance (`allowance`), Gift (`gift`), Refund
+(`refund`), Cashback (`cashback`), Interest (`interest`), Dividend
+(`dividend`), Rental (`rental`), and Other (`other`). The source also filters
+hidden categories and supports custom categories; those paths are outside this
+bounded Kuwi entry.
 
-Available funds are the source's balance for debit accounts and
-`creditLimit - balance` for credit accounts. The form rounds this figure and
-requires it to cover the transfer amount plus fee. Its visible errors are
-“Not enough balance” for debit accounts and “Not enough available credit” for
-credit accounts. The store repeats eligibility and available-funds checks
-before producing a new state.
+For an eligible ordinary income, the store posts only when the date is today or
+earlier and the income is not planned. The balance helper adds income to Debit
+and Asset balances and subtracts it from the amount owed on Credit accounts.
+The inspected code does not establish whether another process changes a
+planned entry to posted when its date arrives.
+The ordinary income form itself exposes Debit and Credit accounts. Its currency
+rounding helper uses the account currency: PHP 12.345 rounds to 12.35 and JPY
+12.5 rounds to 13. As a calculation example, PHP 1,000 plus a same-day income
+of 12.35 gives a Debit balance of 1,012.35; a Credit amount owed of 1,000
+becomes 987.65. The same entry dated tomorrow is planned and leaves either
+balance unchanged. These are calculations from the traced helpers, not
+observed runs of Tarsi.
 
-A positive fee creates a separate expense with category `fees`, the same
-account, date, and creation time as the transfer. Its note is “Bank transfer
-fee to <destination name>” and the transfer stores the fee amount and expense
-ID. A zero fee creates no expense. The transfer reduces the source balance by
-the amount plus fee and increases the debit destination by the transfer
-amount. For example, moving PHP 1,000 from Cash with a PHP 25 fee lowers Cash by
-PHP 1,025, raises the destination by PHP 1,000, and records a PHP 25 Fees
-expense. With no fee, the source falls by PHP 1,000 and no fee expense exists.
-The action updates both accounts and inserts the transfer and optional fee
-expense in the same returned state.
+Kuwi's first income entry supports the selected account's currency. The source
+currency selector and cross-currency conversion flow need their own verified
+rate source and are not included. Recurring income, subcategories, custom or
+hidden categories, and native behavior are also outside this stage.
 
-The helper defaults a missing date to today and the transfer action applies
-the balance changes without a future-date/planned check. The fee expense has no
-budget-exclusion flag. The traced budget aggregator includes expenses unless
-they are marked planned or `affectsSpending: false`, so the fee is counted as
-spending and the transfer principal is not an expense. Kuwi's budget workflow
-is not implemented yet; this describes the recovered web rules only.
+### Same-currency transfer action
 
-Evidence is static web source, not an executed transfer or an iPhone
-observation. The iPhone transfer flow and keyboard behavior remain pending
-acceptance. This trace does not establish cross-currency transfer rules,
-transfer-edit/deletion behavior, or a native date boundary.
+Checked 2026-11-07 from common-bundle module 1731, with available-balance logic
+from module 1709, currency rounding from module 1701, and the state store in
+module 1685. The common bundle SHA-256 is
+`ccac38fefe6008c3988e03c933635bd4fcd1f19ae52b5179f623197bd7cda943`; selected
+module ranges and dependencies are recorded in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-focused-modules-20261107/provenance.json`.
+This is static web code inspection. It does not establish runtime behavior or
+iPhone 2.5.9 parity.
+
+The action rejects a nonpositive principal, identical account IDs, missing
+accounts, and failed eligibility or available-funds checks without changing
+the returned state. A Debit or Credit account may send; only a Debit account
+may receive. Assets accounts are excluded. The source and destination must
+have the same currency for Kuwi issue #8. Tarsi's broader action also accepts
+received amounts in another currency, which belongs to issue #9.
+
+The source must cover principal plus fee. Module 1709 defines available funds
+as the account balance for non-Credit accounts and `credit limit - amount owed`
+for Credit. The transfer action applies currency rounding before checking the
+sum. A positive fee becomes an expense on the source account in the `fees`
+category, with note `Bank transfer fee to <destination name>` and the same
+date and creation timestamp as the transfer. The action moves principal to the
+destination and records the principal, fee, and linked fee expense in one
+returned store update. It applies the movement immediately, including for a
+future date.
+
+Module 1701 uses two decimal places for PHP and zero for JPY. Its examples
+include PHP 12.345 rounding to 12.35 and JPY 12.5 rounding to 13. Kuwi's
+currently supported account currencies use two decimals except JPY. Kuwi's
+transfer form limits typed input to that precision and stores integer minor
+units.
+
+Worked examples from the traced helpers:
+
+| Source balance | Transfer | Fee | Result |
+| --- | ---: | ---: | --- |
+| PHP 1,500.00 Debit | PHP 200.00 | None | Source PHP 1,300.00; destination receives PHP 200.00. |
+| PHP 1,000.00 Debit | PHP 975.00 | PHP 25.00 | Source PHP 0.00; destination receives PHP 975.00; linked fee expense is PHP 25.00. |
+| PHP 1,024.99 Debit | PHP 1,000.00 | PHP 25.00 | Rejected because principal plus fee exceeds available balance by PHP 0.01. |
+| PHP 50.00 owed, PHP 150.00 credit limit | PHP 95.00 from Credit | PHP 5.00 | Available credit is PHP 100.00; result owes PHP 150.00 and the Debit destination receives PHP 95.00. |
+
+The cached index maps `./transfer.tsx` to
+`/_expo/static/js/web/transfer-2dbf20b142412a934fd581303887e2c8.js`, but that
+lazy chunk is absent from the local cache. The public JavaScript reader rejected
+the `application/javascript` response and the browser access host was
+unavailable. The action rules above are verified; exact transfer screen
+interactions and iPhone comparison remain open.
 
 ## Device persistence
 

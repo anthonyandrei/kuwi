@@ -1,8 +1,10 @@
 # Kuwi product app
 
-Issue #2's local setup app is separate from the disposable storage probe.
-It uses Expo, React Native Web, Expo Router, Reanimated, and the supplied third
-quokka reference with cream and sage colors. Local use requires no sign-in.
+The local finance app is separate from the disposable storage probe. It uses
+Expo, React Native Web, Expo Router, Reanimated, and the supplied quokka
+reference with cream and sage colors. It supports local setup, accounts,
+expenses, and ordinary income entry with transaction history. Local use
+requires no sign-in.
 
 From the repository root:
 
@@ -61,17 +63,16 @@ releases file handles before the ownership lock. Another tab can then retry
 opening the same saved account. Safari and the installed Home Screen app have
 separate stores.
 
-The schema stores currencies, profiles, accounts, and one setup completion
-record. Each table has an explicit primary key. Currency precision depends
-only on currency code; profile preferences depend on profile ID; opening
-balance and currency depend on account ID. Setup references its profile and
-first account. No derived display balance, duplicated currency metadata, or
-profile snapshot is stored. Related setup inserts share one immediate SQLite
-transaction. Stable local profile/account keys and a singleton completion
-record make retries return the committed setup without another opening record.
-A missing save reply terminates the worker after 15 seconds and exposes a retry.
-Retrying checks canonical setup before inserting. Local setup has no Clerk or
-Convex dependency.
+The strict SQLite schema normalizes currencies, profiles, accounts, setup,
+adjustments, expense and income categories, expenses, incomes, and pending
+operations. Balances derive from adjustments and posted transactions; the app
+stores no mutable balance copy. Setup writes and each transaction with its
+pending sync marker commit atomically. Stable operation IDs let a retry return
+the saved transaction or reject changed content under the same ID. A missing
+save reply terminates the worker after 15 seconds so a retry can check whether
+the write committed. Schema versions and the v1 to v4 migration sequence are
+documented in [local finance storage](../../docs/finance-storage.md). Local use
+has no Clerk or Convex dependency.
 
 The six observed currency tiles are PHP, USD, EUR, GBP, JPY, and TWD. PHP, Cash,
 and zero are the defaults. JPY uses whole units; the other enabled currencies
@@ -113,12 +114,12 @@ No Cloudflare product deployment or storage migration was needed.
 
 ## Validation on 2026-11-07
 
-The `npm exec --yes --package=pnpm@11.25.0 -- pnpm check` command passed lint,
-TypeScript, the static web build, and all 58 Chromium/WebKit journeys. This
-includes backup downloads and file selection, integrity and reference rejection,
-valid and repeated restores, rollback after replacement begins, and offline
-reopening followed by another write. Physical iPhone Files acceptance remains
-pending.
+`npm exec --yes --package=pnpm@11.25.0 -- pnpm check` passed lint, TypeScript,
+the static build, and all 80 Playwright journeys, 40 each in Chromium and
+WebKit, against real OPFS storage. Coverage includes income posting and retries,
+backup downloads and file selection, integrity and reference checks, rollback,
+migration recovery, offline reopening, and another write. Physical iPhone Files
+and income acceptance remain pending.
 
 Physical iPhone installation, offline reopening, and populated Safari ownership
 handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2
@@ -134,9 +135,9 @@ Kuwi uses the observed sequence and defaults with its own cream/sage layout and
 quokka artwork. This verifies usable setup transitions, not identical Tarsi
 animation timing or artwork. Blank-name validation and non-PHP precision still
 come from the separate shipped-web evidence, not new native observations.
-Physical iPhone Files export and restore acceptance remains pending. The
-desktop browser journeys do not establish installed-app picker or download
-behavior.
+Physical iPhone Files export and restore, income entry, and later finance
+journeys remain outstanding. Browser journeys do not establish installed-app
+picker or download behavior.
 
 ## Vercel verification on 2026-11-07
 

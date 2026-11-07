@@ -6,7 +6,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { getLocalDate } from "../expenses/entry";
+import { getLocalDate } from "../transactions/entry";
 import type { Account, CreateTransferResult } from "../storage/client";
 import { saveTransfer } from "./commands";
 import {

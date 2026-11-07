@@ -49,11 +49,11 @@ const test = base.extend({
           'if(!self.__accountUpdateFailed){self.__accountUpdateFailed=true;throw Error("Simulated account update failure");} db.exec({sql: "UPDATE accounts SET name=',
         );
       }
-      if (storageFault.current === "transferMigration") {
+      if (storageFault.current === "schemaV4Migration") {
         storageFault.current = null;
         return source.replace(
           '      PRAGMA user_version=4;\n    `);\n  });\n}',
-          '      PRAGMA user_version=4;\n    `);\n    throw Error("Simulated transfer migration failure");\n  });\n}',
+          '      PRAGMA user_version=4;\n    `);\n    throw Error("Simulated version 4 migration failure");\n  });\n}',
         );
       }
       if (storageFault.current === "migrateV1" || storageFault.current === "failV1Migration") {
@@ -198,9 +198,9 @@ test("a legacy expense and backup survive the shell update", async ({
     await expect(page.getByRole("status")).toHaveText("Database closed");
 
     storageFault.legacyBuild = false;
-    storageFault.current = "transferMigration";
+    storageFault.current = "schemaV4Migration";
     await page.goto("/");
-    await expect(page.getByRole("alert")).toContainText("Simulated transfer migration failure");
+    await expect(page.getByRole("alert")).toContainText("Simulated version 4 migration failure");
     await page.reload();
     await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
     await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
@@ -338,6 +338,13 @@ test("accounts use supported currencies and keep a credit limit separate from ow
   await page.getByLabel("Opening balance (USD)").fill("10.50");
   await page.getByRole("button", { name: "Save account" }).click();
   await expect(page.getByText(/(?:US)?\$10\.50/)).toBeVisible();
+  await page
+    .getByRole("button", { name: "View account Travel fund", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Add income", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
   await page.getByRole("button", { name: "Add account" }).click();
   await page.getByLabel("Account name").fill("Everyday card");
