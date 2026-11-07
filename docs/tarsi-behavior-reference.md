@@ -471,8 +471,9 @@ A Debit or Credit account can send; only Debit can receive. The accounts must
 differ, and the source must have enough available funds for principal plus any
 source-currency fee. The destination has no funds check. Transfer balance
 effects apply immediately, including for future dates. The fee is a linked
-source-account expense. Kuwi's issue #9 implementation accepts this web
-behavior; iPhone keyboard, formatting, and motion acceptance remains pending.
+source-account expense. Chromium and disk-backed WebKit verify the issue #9
+web journeys. iPhone keyboard, formatting, and motion acceptance remains
+pending.
 
 ## Next evidence needed
 

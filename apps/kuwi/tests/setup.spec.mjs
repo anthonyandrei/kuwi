@@ -1194,6 +1194,8 @@ test("transfer retries reuse one operation and reject conflicting operation IDs"
     fromAccountId: cash.id,
     toAccountId: savings.id,
     amountMinor: 1000,
+    receivedAmountMinor: 1000,
+    exchangeRate: "1",
     feeMinor: 0,
     date: new Date().toISOString().slice(0, 10),
     note: "Worker retry",
@@ -1376,7 +1378,7 @@ test("JPY expenses and transfers use whole yen in history and derived balances",
   await expect(page.getByText(/(?:JP)?¥13/)).toBeVisible();
 });
 
-test("transfer eligibility is visible and invalid account references leave no transfer", async ({
+test("transfer eligibility is visible and cross-currency accounts remain eligible", async ({
   page,
 }) => {
   await fundedSetup(page);
@@ -1391,8 +1393,9 @@ test("transfer eligibility is visible and invalid account references leave no tr
   await page.getByRole("button", { name: "Save account", exact: true }).click();
   await page.getByRole("button", { name: "View account Cash", exact: true }).click();
   await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
-  await expect(page.getByText("Add a debit account in PHP to receive a transfer.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Save transfer", exact: true })).toBeDisabled();
+  await expect(page.getByLabel("To account", { exact: true })).toContainText("Foreign cash");
+  await expect(page.getByLabel("Exchange rate", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save transfer", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
   await page.getByRole("button", { name: "Close database", exact: true }).click();
@@ -1414,18 +1417,26 @@ test("transfer eligibility is visible and invalid account references leave no tr
       worker.addEventListener("message", onMessage);
       worker.postMessage({ id: requestId, command, args });
     });
-    const base = { amountMinor: 100, feeMinor: 0, date };
+    const base = { amountMinor: 100, receivedAmountMinor: 100, exchangeRate: "1", feeMinor: 0, date };
     const cases = [
       { operationId: "invalid-identical", fromAccountId: cashId, toAccountId: cashId },
       { operationId: "invalid-missing", fromAccountId: cashId, toAccountId: "missing-account" },
       { operationId: "invalid-assets", fromAccountId: cashId, toAccountId: assetsId },
-      { operationId: "invalid-currency", fromAccountId: cashId, toAccountId: foreignId },
     ];
     const messages = [];
     for (const input of cases) {
       const response = await send("createTransfer", { ...base, ...input });
       messages.push(response.error);
     }
+    const crossCurrency = await send("createTransfer", {
+      ...base,
+      operationId: "cross-currency-valid",
+      fromAccountId: cashId,
+      toAccountId: foreignId,
+      receivedAmountMinor: 1,
+      exchangeRate: "0.018",
+    });
+    messages.push(crossCurrency.error ?? null);
     await send("close");
     worker.terminate();
     return messages;
@@ -1439,9 +1450,16 @@ test("transfer eligibility is visible and invalid account references leave no tr
     "Choose two different accounts.",
     "Choose available transfer accounts.",
     "Transfers require a debit or credit source and a debit destination.",
-    "Choose accounts with the same currency.",
+    null,
   ]);
   const ledger = await runWorkerCommand(page, "ledger", { accountId: cash.id });
-  expect(ledger.account.balance_minor).toBe(100000);
-  expect(ledger.transfers).toEqual([]);
+  expect(ledger.account.balance_minor).toBe(99900);
+  expect(ledger.transfers).toEqual([
+    expect.objectContaining({
+      amount_minor: 100,
+      received_amount_minor: 1,
+      exchange_rate: "0.018",
+      to_currency_code: "USD",
+    }),
+  ]);
 });

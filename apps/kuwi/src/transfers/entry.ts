@@ -63,39 +63,22 @@ export function parseTransferRate(input: string): number | null {
   return Number.isFinite(rate) && rate > 0 ? rate : null;
 }
 
-/** Preserve the canonical decimal representation of the parsed binary64 rate.
+/** Preserve the canonical decimal representation of the parsed JavaScript rate.
  * @param rate - Positive finite JavaScript number.
  * @returns Round-trippable decimal text for storage and request fingerprints.
+ * @throws {Error} The rate is zero, negative, or non-finite.
  */
 export function canonicalTransferRate(rate: number): string {
   if (!Number.isFinite(rate) || rate <= 0) throw new Error("Enter a positive exchange rate.");
   return rate.toString();
 }
 
-/** Truncate a finite decimal's shortest text representation into target minor units.
- * @param value - Nonnegative JavaScript number produced by the currency conversion.
- * @param decimalPlaces - Fraction digits of the destination currency.
- * @returns A safe integer in destination minor units, or null when it is invalid or too large.
- */
-function truncateNumericAmountToMinor(value: number, decimalPlaces: number): number | null {
-  if (!Number.isFinite(value) || value < 0) return null;
-  // Use the number's rendered decimal digits so truncation matches the editable input formatter.
-  const [coefficientText, exponentText] = value.toString().toLowerCase().split("e");
-  const [whole, fraction = ""] = coefficientText.split(".");
-  const coefficient = BigInt(`${whole}${fraction}`);
-  const decimalShift = (exponentText ? Number(exponentText) : 0) - fraction.length + decimalPlaces;
-  const minor = decimalShift >= 0
-    ? coefficient * 10n ** BigInt(decimalShift)
-    : coefficient / 10n ** BigInt(-decimalShift);
-  return minor <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(minor) : null;
-}
-
-/** Calculate received minor units, truncating excess target precision as Tarsi's form does.
- * @param sourceMinor - Positive integer source amount in source-currency minor units.
- * @param sourceDigits - Source currency decimal places.
- * @param rate - Destination units per source unit.
- * @param destinationDigits - Destination currency decimal places.
- * @returns Positive received amount in destination minor units, or null if it is not representable.
+/** Apply the rate's canonical decimal text and truncate toward zero at destination precision.
+ * @param sourceMinor - Positive safe integer in source-currency minor units.
+ * @param sourceDigits - Source currency decimal places, from zero through three.
+ * @param rate - Positive finite destination units per source unit.
+ * @param destinationDigits - Destination currency decimal places, from zero through three.
+ * @returns Positive destination minor units, or null for invalid inputs, a zero result, or overflow.
  */
 export function receivedAmountFromRate(
   sourceMinor: number,
@@ -107,17 +90,27 @@ export function receivedAmountFromRate(
     !Number.isInteger(sourceDigits) || sourceDigits < 0 || sourceDigits > 3 ||
     !Number.isInteger(destinationDigits) || destinationDigits < 0 || destinationDigits > 3 ||
     !Number.isFinite(rate) || rate <= 0) return null;
-  const convertedAmount = (sourceMinor / 10 ** sourceDigits) * rate;
-  const receivedMinor = truncateNumericAmountToMinor(convertedAmount, destinationDigits);
-  return receivedMinor !== null && receivedMinor > 0 ? receivedMinor : null;
+  const rateText = rate.toString().toLowerCase();
+  const [coefficientText, exponentText] = rateText.split("e");
+  const [whole, fraction = ""] = coefficientText.split(".");
+  const coefficient = BigInt(`${whole}${fraction}`);
+  const rateScale = fraction.length - (exponentText ? Number(exponentText) : 0);
+  const decimalShift = destinationDigits - sourceDigits - rateScale;
+  const numerator = BigInt(sourceMinor) * coefficient;
+  const receivedMinor = decimalShift >= 0
+    ? numerator * 10n ** BigInt(decimalShift)
+    : numerator / 10n ** BigInt(-decimalShift);
+  return receivedMinor <= BigInt(Number.MAX_SAFE_INTEGER) && receivedMinor > 0n
+    ? Number(receivedMinor)
+    : null;
 }
 
-/** Derive the unrounded rate from exact entered source and received minor units.
- * @param sourceMinor - Positive source amount in source-currency minor units.
- * @param sourceDigits - Source currency decimal places.
- * @param receivedMinor - Positive received amount in destination-currency minor units.
- * @param destinationDigits - Destination currency decimal places.
- * @returns Positive finite destination-per-source rate, or null for invalid values.
+/** Derive a positive rate from exact source and received minor-unit amounts.
+ * @param sourceMinor - Positive safe integer in source-currency minor units.
+ * @param sourceDigits - Source currency decimal places, from zero through three.
+ * @param receivedMinor - Positive safe integer in destination-currency minor units.
+ * @param destinationDigits - Destination currency decimal places, from zero through three.
+ * @returns Positive finite destination units per source unit, or null for invalid values.
  */
 export function rateFromReceivedAmount(
   sourceMinor: number,
@@ -129,7 +122,6 @@ export function rateFromReceivedAmount(
     !Number.isSafeInteger(receivedMinor) || receivedMinor <= 0 ||
     !Number.isInteger(sourceDigits) || sourceDigits < 0 || sourceDigits > 3 ||
     !Number.isInteger(destinationDigits) || destinationDigits < 0 || destinationDigits > 3) return null;
-  const rate = (receivedMinor / 10 ** destinationDigits) /
-    (sourceMinor / 10 ** sourceDigits);
+  const rate = (receivedMinor / sourceMinor) * 10 ** (sourceDigits - destinationDigits);
   return Number.isFinite(rate) && rate > 0 ? rate : null;
 }

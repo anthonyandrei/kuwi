@@ -138,12 +138,16 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
 
     await page.getByRole("button", { name: "Add account", exact: true }).click();
     await page.getByLabel("Account name", { exact: true }).fill("Reserve");
+    await page.getByRole("button", { name: "USD US Dollar", exact: true }).click();
     await page.getByRole("button", { name: "Save account", exact: true }).click();
     await page.getByRole("button", { name: "View account Cash", exact: true }).click();
     await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+    await page.getByLabel("To account", { exact: true }).selectOption({ label: "Reserve" });
     await page.getByLabel("Transfer amount", { exact: true }).fill("100");
+    await page.getByLabel("Exchange rate", { exact: true }).fill("0.018");
     await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
     await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+    await expect(page.getByText("₱1,375.00", { exact: true })).toBeVisible();
 
     await openBudgets(page);
     await setFixedBudget(page, "Fees", "50");

@@ -131,21 +131,19 @@ No Cloudflare product deployment or storage migration was needed.
 ## Validation on 2026-11-08
 
 `npm exec --yes --package=pnpm@11.25.0 -- pnpm check` passed lint, TypeScript,
-the static build, five budget calculation tests, and 122 Playwright journeys
-against real OPFS storage: 61 in Chromium and 61 in WebKit. WebKit retained
-OPFS data for the same origin after a persistent context closed and a second
-profile opened. Each journey uses a unique `.localhost` hostname so a reused
-port cannot expose another journey's database.
+the static build, ten unit tests, and 138 Playwright journeys against real OPFS
+storage: 69 in Chromium and 69 in disk-backed WebKit. WebKit retained OPFS data
+for the same origin after a persistent context closed and a second profile
+opened. Each journey uses a unique `.localhost` hostname so a reused port
+cannot expose another journey's database.
 
-Coverage includes budget creation, corrected-ledger progress, percentage
-income limits, transfer fees, zero clears, version 7 backup export and restore,
-atomic failure recovery, stable retries, and offline reopen. The wider suite
-also checks income posting, transaction corrections and deletion, backup
-validation, migration recovery, and another offline write. Physical iPhone
-Files, budget, and income acceptance remain pending.
-
-These browser results predate the current cross-currency transfer changes. The
-transfer journeys still need the sequential integration run.
+Coverage includes both v7-to-v8 migration layouts, manual cross-currency rate
+and received-amount entry, currency-specific history and balances, transfer
+backup validation, exact retries after a lost reply, atomic failure recovery,
+and budget progress with a foreign-currency destination. The wider suite checks
+income posting, transaction corrections and deletion, legacy backup restore,
+and offline writes. Physical iPhone acceptance for transfers, budgets, income,
+and Files backup export and restore remains pending.
 
 Physical iPhone installation, offline reopening, and populated Safari ownership
 handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2

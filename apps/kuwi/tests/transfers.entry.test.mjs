@@ -25,6 +25,8 @@ test("source, received, and fee inputs use their own currency precision", () => 
 test("rate calculation truncates received currency precision before storing minor units", () => {
   assert.equal(receivedAmountFromRate(10000, 2, 149.8765, 0), 14987);
   assert.equal(receivedAmountFromRate(100000, 2, 0.0184567, 2), 1845);
+  assert.equal(receivedAmountFromRate(10000, 2, 0.018, 2), 180);
+  assert.equal(receivedAmountFromRate(300, 2, 0.289, 2), 86);
 });
 
 test("manual received amount derives a canonical positive JavaScript rate", () => {
@@ -40,7 +42,7 @@ test("rate input accepts arbitrary finite precision and rejects invalid values",
   assert.equal(parseTransferRate("1,000"), null);
 });
 
-test("rate calculation truncates the converted number's decimal text to destination precision", () => {
+test("rate calculation truncates fractional target minor units", () => {
   assert.equal(receivedAmountFromRate(100, 2, 0.29, 2), 29);
-  assert.equal(receivedAmountFromRate(300, 2, 0.29, 2), 86);
+  assert.equal(receivedAmountFromRate(300, 2, 0.29, 2), 87);
 });

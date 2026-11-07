@@ -239,7 +239,6 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(sameCurrencyV6Backup))),
     });
     await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     const currencyV7Backup = structuredClone(backup);
     currencyV7Backup.schemaVersion = 7;
@@ -251,7 +250,6 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(currencyV7Backup))),
     });
     await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     const budgetV7Backup = structuredClone(backup);
     budgetV7Backup.schemaVersion = 7;
@@ -264,7 +262,6 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(budgetV7Backup))),
     });
     await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     await page.getByRole("button", { name: "View account Cash", exact: true }).click();
     await page.getByRole("button", { name: "Add expense", exact: true }).click();
@@ -368,6 +365,9 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     transferOnlyBackup.schemaVersion = 4;
     delete transferOnlyBackup.data.budgets;
     delete transferOnlyBackup.data.pendingBudgetOperations;
+    transferOnlyBackup.data.transfers = transferOnlyBackup.data.transfers.map(
+      ({ received_amount_minor, exchange_rate, ...transfer }) => transfer,
+    );
     delete transferOnlyBackup.data.incomeCategories;
     delete transferOnlyBackup.data.incomes;
     delete transferOnlyBackup.data.pendingIncomeSyncOperations;
@@ -383,6 +383,9 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     v4Backup.schemaVersion = 4;
     delete v4Backup.data.budgets;
     delete v4Backup.data.pendingBudgetOperations;
+    v4Backup.data.transfers = v4Backup.data.transfers.map(
+      ({ received_amount_minor, exchange_rate, ...transfer }) => transfer,
+    );
     delete v4Backup.data.pendingTransactionOperations;
     await restoreFile(page, {
       name: "combined-v4.kuwi.json",
@@ -504,6 +507,61 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     await expect(page.getByText("Transfer to Reserve", { exact: true })).toBeVisible();
     await expect(page.getByText("Bank transfer fee to Reserve", { exact: true })).toBeVisible();
     await expect(page.getByText("Offline tea", { exact: true })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("restore rejects invalid cross-currency amounts and missing transfer receipts", async ({
+  browserName,
+  baseURL,
+}, testInfo) => {
+  const browserType = browserName === "webkit" ? webkit : chromium;
+  const directory = testInfo.outputPath("invalid-transfer-backup-profile");
+  await rm(directory, { recursive: true, force: true });
+  const context = await browserType.launchPersistentContext(directory, { baseURL });
+  try {
+    const page = await context.newPage();
+    await finishSetup(page);
+    await page.getByRole("button", { name: "Add account", exact: true }).click();
+    await page.getByLabel("Account name", { exact: true }).fill("Dollar wallet");
+    await page.getByRole("button", { name: "USD US Dollar", exact: true }).click();
+    await page.getByRole("button", { name: "Save account", exact: true }).click();
+    await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+    await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+    await page.getByLabel("To account", { exact: true }).selectOption({ label: "Dollar wallet" });
+    await page.getByLabel("Transfer amount", { exact: true }).fill("100");
+    await page.getByLabel("Exchange rate", { exact: true }).fill("0.018");
+    await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("1");
+    await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+    await expect(page.getByText("₱899.00", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export backup", exact: true }).click();
+    const backup = JSON.parse(await (await import("node:fs/promises")).readFile(
+      await (await downloadPromise).path(),
+      "utf8",
+    ));
+    const invalidAmount = structuredClone(backup);
+    invalidAmount.data.transfers[0].received_amount_minor = 0;
+    await restoreFile(page, {
+      name: "invalid-received-amount.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(invalidAmount))),
+    });
+    await expect(page.getByRole("alert")).toContainText("received_amount_minor is invalid");
+    await expect(page.getByText("₱899.00", { exact: true })).toBeVisible();
+
+    const missingReceipt = structuredClone(backup);
+    missingReceipt.data.pendingTransferOperations = [];
+    await restoreFile(page, {
+      name: "missing-transfer-receipt.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(missingReceipt))),
+    });
+    await expect(page.getByRole("alert")).toContainText("transfer is missing its pending operation");
+    await expect(page.getByText("₱899.00", { exact: true })).toBeVisible();
   } finally {
     await context.close();
   }

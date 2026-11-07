@@ -56,8 +56,8 @@ explicit. These are delivery goals, not claims that the features already ship.
 The app in `apps/kuwi` implements local onboarding, accounts, expenses,
 ordinary income, offline cross-currency transfers, category budgets, and
 backup/restore. These workflows use local SQLite storage. Browser validation
-for the current transfer changes remains pending. Physical iPhone acceptance
-for finance workflows also remains pending. Home, grouped Wallet, and the
+passes in Chromium and disk-backed WebKit. Physical iPhone acceptance for
+finance workflows remains pending. Home, grouped Wallet, and the
 remaining finance workflows are outstanding. Clerk and Convex are not
 provisioned.
 

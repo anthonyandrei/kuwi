@@ -990,15 +990,15 @@ test("cross-currency transfers preserve both minor-unit amounts through history,
   await page.getByRole("button", { name: "Save transfer" }).click();
   await expect(page.getByText(/(?:US)?\$98\.77/)).toBeVisible();
   await page.getByRole("button", { name: "Transaction history" }).click();
-  await expect(page.getByText(/Sent (?:US)?\$100\.00 USD · received ¥14,987 JPY/)).toBeVisible();
+  await expect(page.getByText(/Sent (?:US)?\$100\.00 USD · received (?:JP)?¥14,987 JPY/)).toBeVisible();
   await expect(page.getByText("Rate: 1 USD = 149.8765 JPY", { exact: true })).toBeVisible();
   await expect(page.getByText(/Fee: (?:US)?\$1\.23 USD/)).toBeVisible();
   await page.getByRole("button", { name: "Back to account" }).click();
   await page.getByRole("button", { name: "Back to accounts" }).click();
   await page.getByRole("button", { name: "View account Yen wallet" }).click();
-  await expect(page.getByText("¥14,987", { exact: true })).toBeVisible();
+  await expect(page.getByText(/(?:JP)?¥14,987/)).toBeVisible();
   await page.getByRole("button", { name: "Transaction history" }).click();
-  await expect(page.getByText(/Sent (?:US)?\$100\.00 USD · received ¥14,987 JPY/)).toBeVisible();
+  await expect(page.getByText(/Sent (?:US)?\$100\.00 USD · received (?:JP)?¥14,987 JPY/)).toBeVisible();
   await page.getByRole("button", { name: "Back to account" }).click();
   await page.getByRole("button", { name: "Back to accounts" }).click();
 
@@ -1022,7 +1022,7 @@ test("cross-currency transfers preserve both minor-unit amounts through history,
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify(backup)),
   });
-  await expect(page.getByText("¥14,987", { exact: true })).toBeVisible();
+  await expect(page.getByText(/(?:JP)?¥14,987/)).toBeVisible();
 });
 
 test("a failed cross-currency write rolls back every effect and retries once", async ({

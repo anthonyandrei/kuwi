@@ -309,8 +309,10 @@ function migrateBudgets() {
  * Fresh stores are upgraded through v8; stored v1 through v7 databases run each
  * required migration before a command can read or write data. Version 7 may be
  * either the currency-transfer or budget-only layout, so both final migrations
- * are idempotent. A failed step
- * leaves that step's starting schema and records available for a later retry.
+ * are idempotent. A failed step leaves its starting schema and records
+ * available for a later retry.
+ * @returns {Promise<void>} Resolves after SQLite opens and migrations finish;
+ *   the lock stays held until close.
  * @throws {Error} OPFS or Web Locks is unavailable, another tab owns the database,
  *   the database version is unsupported, or initialization fails.
  */

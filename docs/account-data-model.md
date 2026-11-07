@@ -149,18 +149,15 @@ migration and preserves version 2 data if it fails.
 
 Version 4 adds income categories, incomes, and pending income sync markers.
 Version 5 adds transaction edit/delete receipts. Version 6 adds transfers,
-linked fee references on expenses, and pending transfer operations. Version 7
-adds received-currency minor units and the canonical parsed exchange-rate
-string. Existing same-currency transfers migrate with equal source and received
-amounts and rate `1`. The currency migration is transactional and preserves
-populated v6 stores when a backfill fails.
-
-Version 8 adds normalized category budgets and pending budget operation
-receipts. Some v7 stores already have budgets and same-currency transfers,
-while others have currency-aware transfers without budgets. Opening either
-layout adds only the missing relations or transfer columns, then advances to
-v8. Transfer fees stay as linked expenses, and transfer principal remains a
-separate ledger fact.
+linked fee references on expenses, and pending transfer operations. The two v7
+layouts reflect separate schema histories: one adds received-currency minor
+units and the canonical parsed exchange-rate string; the other adds normalized
+category budgets and pending budget operation receipts. Version 8 combines
+both layouts. Opening either v7 layout adds only the missing relations or
+transfer columns, then advances to v8. Existing same-currency transfers receive
+equal source and received amounts and rate `1`. Migrations run transactionally
+and preserve populated stores if a backfill fails. Transfer fees stay as
+linked expenses, and transfer principal remains a separate ledger fact.
 
 The adjustment table currently accepts initial balances only. Manual balance
 adjustments, account deletion, loan schedules, investments, and cloud-sync

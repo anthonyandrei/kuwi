@@ -14,15 +14,12 @@ Version 3 adds expense categories, expenses, pending sync markers, and an
 account/date index. Version 4 adds income categories, incomes, pending income
 sync markers, and an account/date index. Version 5 adds transaction
 edit/delete receipts. Version 6 adds transfers, linked fee references on
-expenses, and pending transfer operations. Version 7 adds currency-aware
-received amounts and canonical parsed exchange rates to transfers. Version 8
-adds category budgets and pending budget operation receipts.
-
-Some existing v7 stores have currency-aware transfers, while others have
-budgets with same-currency transfers. Opening either layout idempotently applies
-the missing migration and advances the store to v8. Each migration commits in
-its own transaction. A failed step keeps its starting schema and data for a
-retry.
+expenses, and pending transfer operations. Existing v7 stores have one of two
+layouts: currency-aware transfer amounts and rates, or category budgets and
+budget receipts with same-currency transfers. Version 8 combines both layouts.
+Opening either v7 store applies the missing migration and preserves its existing
+records. Each migration commits in its own transaction. A failed step keeps its
+starting schema and data for a retry.
 
 The v6 migration supports both earlier v4 layouts. Income-only v4 databases
 receive transfer relations, and v4 databases that already contain transfers
@@ -32,7 +29,8 @@ income, and sync marker identities after upgrade. The currency migration
 backfills each existing same-currency transfer with an equal received amount
 and rate `1`. It backfills only when the received-amount column is absent, so
 reopening a currency-aware store preserves recorded values. Schema and data
-changes roll back together on failure.
+changes roll back together on failure. The v7-to-v8 migration adds or preserves
+the transfer currency columns before creating any missing budget relations.
 
 ## Ledger writes and balances
 
@@ -49,9 +47,11 @@ different Debit account. The source must have enough balance or available
 credit to cover source principal plus fee. The manual rate uses the direction
 `1 source currency = rate destination currency`, and both rate and received
 amount entry work offline. Received amounts are truncated to destination
-precision before storage. The source principal and fee use source minor units;
-the received amount uses destination minor units. A positive fee is stored as
-an expense in the Fees category and references the transfer ID. The fee name is
+precision before storage. Kuwi parses the rate as a JavaScript number, stores
+its canonical decimal string, and uses that text for conversion to avoid binary
+floating-point tails. The source principal and fee use source minor units; the
+received amount uses destination minor units. A positive fee is stored as an
+expense in the Fees category and references the transfer ID. The fee name is
 `Bank transfer fee to <destination>`. The transfer uses the selected date,
 including future dates, and affects balances immediately.
 
@@ -114,7 +114,8 @@ Restore accepts v3 backups without income or transfer relations, v4 backups
 from income-only and transfer-only builds, v4 backups containing both feature
 sets, v5 backups with transaction receipts, v6 backups with transfer data, and
 both v7 layouts. Older backups gain empty budget relations. Budget-only v7
-backups gain same-currency transfer amounts and rate `1`. It checks
+backups gain same-currency transfer amounts and rate `1`; currency-aware v7
+backups retain their recorded amounts and rates. It checks
 the digest, exact relation fields,
 SQLite value constraints, unique keys, and references before replacing data.
 Legacy formats gain canonical empty relations when restored. A transfer backup
