@@ -47,3 +47,39 @@ ordered as v1 to v2 to v3. Keep that sequence and the existing setup
 references when changing the schema. Future sync work must retain stable
 operation IDs and define how acknowledged expense records remain available to
 history.
+
+## Product backup contract
+
+The product exports a JSON envelope with `format: "kuwi.backup"`, backup
+`version: 1`, `schemaVersion: 3`, an ISO `exportedAt`, and an integrity object
+containing `algorithm: "SHA-256"` and a lowercase digest. The digest covers the
+canonical JSON form of `format`, `version`, `schemaVersion`, and `data`. Object
+keys are sorted recursively before hashing; array order is retained. The
+contract includes the complete v3 source data: currencies, profiles, accounts,
+account adjustments, setup, pending account operations, expense categories,
+expenses, and pending sync operations. Derived balances and display labels are
+not copied because they are calculated from these canonical rows.
+
+Restore checks the format and versions, digest, exact relation fields, SQLite
+value constraints, and all foreign-key references before it begins replacement.
+It also checks unique keys, the supported currency and category definitions,
+account and adjustment values, positive integer expense amounts, and valid
+expense dates through the current local day. The current currency and built-in
+category definitions are part of v1. A candidate must include each expense's
+pending sync marker and preserve its operation ID, account operation IDs, and
+request fingerprints. The validator does not change the live database. After
+validation, the worker deletes and inserts rows in foreign-key order inside one
+immediate transaction. A write error rolls the full replacement back. The app
+reloads its visible setup and balances only after commit.
+
+Changes to the supported relations, invariants, or currency/category definitions
+need an explicit backup compatibility decision and round-trip journey update.
+Backup `version` identifies the backup contract; `schemaVersion` identifies the
+source SQLite schema. The importer currently accepts only this v1/v3 pair.
+
+Income remains a separate future workflow. It should add its own finance
+command module and worker command handler, with an income record and pending
+sync record committed in one transaction. It must extend the normalized schema
+through a migration and update the backup contract and real-persistence
+journeys. Income facts must not be folded into expense rows or duplicated in
+derived account balances.
