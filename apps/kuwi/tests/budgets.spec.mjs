@@ -180,7 +180,7 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
     const download = await downloadPromise;
     const backup = JSON.parse(await readFile(await download.path(), "utf8"));
-    expect(backup.schemaVersion).toBe(7);
+    expect(backup.schemaVersion).toBe(8);
     expect(backup.data.budgets).toHaveLength(3);
     expect(backup.data.pendingBudgetOperations).toHaveLength(4);
     expect(backup.data.budgets.find(({ category_id }) => category_id === "food")).toMatchObject({

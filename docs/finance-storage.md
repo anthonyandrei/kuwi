@@ -15,9 +15,11 @@ account/date index. Version 4 adds income categories, incomes, pending income
 sync markers, and an account/date index. Version 5 adds transaction
 edit/delete receipts. Version 6 adds transfers, linked fee references on
 expenses, and pending transfer operations. Version 7 adds canonical category
-budgets and pending budget operation receipts.
+budgets and pending budget operation receipts. Version 8 adds explicit planned
+state and scheduled amounts to expenses and incomes, and adds log receipts.
+It copies existing edit and delete receipts while rebuilding their table.
 
-A new database builds through versions 2 through 7. Older databases run each
+A new database builds through versions 2 through 8. Older databases run each
 remaining migration in order, with each step in its own transaction. A failed
 step keeps its starting schema and data for a retry.
 
@@ -64,43 +66,60 @@ Kuwi currently has no FX quote source, so progress is unavailable when
 qualifying expenses or income use a currency different from the profile's
 preferred currency.
 
-The app derives Debit and Assets balances from adjustments, expenses, posted
-income, and transfer principal. Expenses reduce those balances; posted income
-adds to them. Credit expenses increase the amount owed and posted income lowers
-it. Transfer principal reduces the source balance or increases its Credit debt,
-and increases the Debit destination balance. A fee reduces the source balance
-or increases its Credit debt. Planned income does not affect balances.
+The app derives Debit and Assets balances from adjustments, posted expenses,
+posted income, and transfer principal. Expenses reduce those balances; posted
+income adds to them. Credit expenses increase the amount owed and posted income
+lowers it. Transfer principal reduces the source balance or increases its
+Credit debt, and increases the Debit destination balance. A fee reduces the
+source balance or increases its Credit debt. Planned expenses and income do
+not affect balances, even after their due date passes.
+
+A date after the browser's local calendar date creates a planned entry. The
+initial planned intent stays attached to a failed create retry if the date
+passes before the write succeeds. Closing and reopening the app does not post it
+when the date passes. History marks the entry Planned or Overdue until the user
+chooses Log. Logging asks for
+confirmation for an expense and for the actual amount of an income. A still-
+future due date logs with today's local date; a due or overdue entry keeps its
+scheduled date. The write and its receipt commit together, and
+`planned_amount_minor` retains the scheduled amount after logging.
+
+Editing a posted entry into the future makes it planned and removes its balance
+effect. Editing a still-future plan to today or earlier posts it. An overdue
+plan remains planned through ordinary edits until the user logs it. Deleting a
+planned entry has no balance effect; deleting a posted entry removes its
+derived effect.
 
 Editing an expense or income replaces its account, category, amount, date, and
 note while preserving its ID and creation time. The replacement and edit receipt
 commit together. Deleting a transaction, removing its create sync marker, and
 writing its delete receipt also commit together. Receipt IDs provide stable
 retries and retain deleted transaction IDs. Editing can move a transaction only
-between accounts with the same currency. Planned income can be deleted, while
-editing planned income remains blocked pending verification of its posting
-transition. Linked transfer fees are controlled by their transfer and cannot
-be edited or deleted as ordinary expenses.
+between accounts with the same currency. Linked transfer fees are controlled
+by their transfer and cannot be edited or deleted as ordinary expenses.
 
 ## Backup contract
 
 Exports use a JSON envelope with `format: "kuwi.backup"`, backup `version: 1`,
-`schemaVersion: 7`, an ISO `exportedAt`, and an integrity object with
+`schemaVersion: 8`, an ISO `exportedAt`, and an integrity object with
 `algorithm: "SHA-256"` and a lowercase digest. The digest covers the canonical
 JSON form of `format`, `version`, `schemaVersion`, and `data`. Object keys are
 sorted recursively before hashing, and array order is retained.
 
-Current v7 data includes currencies, profiles, accounts, adjustments, setup,
+Current v8 data includes currencies, profiles, accounts, adjustments, setup,
 pending account operations, expense categories and records, pending expense
 sync markers, income categories and records, pending income sync markers,
-transfers, pending transfer operations, transaction edit/delete receipts,
-canonical budget definitions, and pending budget operation receipts.
+transfers, pending transfer operations, transaction edit/delete/log receipts,
+canonical budget definitions, pending budget operation receipts, planned flags,
+and original scheduled amounts for logged entries.
 The exported `fee_amount_minor` is derived from the linked fee expense. Joined
 labels and balances are also derived.
 
 Restore accepts v3 backups without income or transfer relations, v4 backups
 from income-only and transfer-only builds, v4 backups containing both feature
 sets, v5 backups with transaction receipts, v6 backups with transfer data, and
-current v7 backups. Older backups gain empty budget relations. It checks
+v7 and v8 backups. Backups before v7 gain empty budget relations. Backups before
+v8 gain planned fields and infer future-dated expenses as planned. Restore checks
 the digest, exact relation fields,
 SQLite value constraints, unique keys, and references before replacing data.
 Legacy formats gain canonical empty relations when restored. A transfer backup

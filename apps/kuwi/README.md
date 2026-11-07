@@ -4,9 +4,10 @@ The local finance app is separate from the disposable storage probe. It uses
 Expo, React Native Web, Expo Router, Reanimated, and the supplied quokka
 reference with cream and sage colors. It supports local setup, accounts,
 expenses, ordinary income, same-currency transfers, category budgets, and
-versioned backup/restore. Transaction history supports editing or deleting
-posted expenses and income; planned-income editing remains blocked pending
-rule verification. Local use requires no sign-in.
+versioned backup/restore. Future-dated expenses and income stay planned until
+the user logs them. History supports editing or deleting planned and posted
+transactions and logging planned entries. Balances derive from posted ledger
+entries. Local use requires no sign-in.
 
 From the repository root:
 

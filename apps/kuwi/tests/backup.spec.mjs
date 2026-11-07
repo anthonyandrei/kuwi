@@ -101,6 +101,32 @@ function withValidDigest(backup) {
   };
 }
 
+/** Remove fields introduced after a backup schema while keeping its older relations intact.
+ * @param {object} backup - Current exported envelope to copy.
+ * @param {number} schemaVersion - Historical schema version for the candidate.
+ * @returns {object} A candidate with a shape that version actually supported.
+ */
+function backupAtVersion(backup, schemaVersion) {
+  const candidate = structuredClone(backup);
+  candidate.schemaVersion = schemaVersion;
+  if (schemaVersion < 8) {
+    candidate.data.expenses = candidate.data.expenses.map((expense) => {
+      delete expense.planned;
+      delete expense.planned_amount_minor;
+      return expense;
+    });
+    candidate.data.incomes = candidate.data.incomes.map((income) => {
+      delete income.planned_amount_minor;
+      return income;
+    });
+  }
+  if (schemaVersion < 7) {
+    delete candidate.data.budgets;
+    delete candidate.data.pendingBudgetOperations;
+  }
+  return candidate;
+}
+
 /** Serialize a test backup body with sorted object keys and retained array order.
  * @param {*} value - JSON-compatible test data.
  * @returns {string} Canonical JSON used to form the SHA-256 digest.
@@ -181,7 +207,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     expect(backup).toMatchObject({
       format: "kuwi.backup",
       version: 1,
-      schemaVersion: 7,
+      schemaVersion: 8,
       integrity: { algorithm: "SHA-256" },
       data: {
         profiles: [{ preferred_name: "Anthony", preferred_currency: "PHP" }],
@@ -302,10 +328,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     await expect(page.getByRole("alert")).toContainText("version");
     await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
 
-    const incomeOnlyBackup = structuredClone(backup);
-    incomeOnlyBackup.schemaVersion = 4;
-    delete incomeOnlyBackup.data.budgets;
-    delete incomeOnlyBackup.data.pendingBudgetOperations;
+    const incomeOnlyBackup = backupAtVersion(backup, 4);
     const linkedFeeIds = new Set(
       incomeOnlyBackup.data.expenses.filter((expense) => expense.transfer_id).map(({ id }) => id),
     );
@@ -324,10 +347,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     });
     await expect(page.getByText("₱1,012.00", { exact: true })).toBeVisible();
 
-    const transferOnlyBackup = structuredClone(backup);
-    transferOnlyBackup.schemaVersion = 4;
-    delete transferOnlyBackup.data.budgets;
-    delete transferOnlyBackup.data.pendingBudgetOperations;
+    const transferOnlyBackup = backupAtVersion(backup, 4);
     delete transferOnlyBackup.data.incomeCategories;
     delete transferOnlyBackup.data.incomes;
     delete transferOnlyBackup.data.pendingIncomeSyncOperations;
@@ -339,10 +359,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     });
     await expect(page.getByText("₱884.75", { exact: true })).toBeVisible();
 
-    const v4Backup = structuredClone(backup);
-    v4Backup.schemaVersion = 4;
-    delete v4Backup.data.budgets;
-    delete v4Backup.data.pendingBudgetOperations;
+    const v4Backup = backupAtVersion(backup, 4);
     delete v4Backup.data.pendingTransactionOperations;
     await restoreFile(page, {
       name: "combined-v4.kuwi.json",
@@ -351,10 +368,15 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     });
     await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
 
-    const receiptOnlyV5Backup = structuredClone(backup);
-    receiptOnlyV5Backup.schemaVersion = 5;
-    delete receiptOnlyV5Backup.data.budgets;
-    delete receiptOnlyV5Backup.data.pendingBudgetOperations;
+    const v7Backup = backupAtVersion(backup, 7);
+    await restoreFile(page, {
+      name: "combined-v7.kuwi.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(v7Backup))),
+    });
+    await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
+
+    const receiptOnlyV5Backup = backupAtVersion(backup, 5);
     const v5TransferFeeIds = new Set(
       receiptOnlyV5Backup.data.expenses
         .filter(({ transfer_id }) => transfer_id)
@@ -374,10 +396,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     });
     await expect(page.getByText("₱1,012.00", { exact: true })).toBeVisible();
 
-    const legacyBackup = structuredClone(backup);
-    legacyBackup.schemaVersion = 3;
-    delete legacyBackup.data.budgets;
-    delete legacyBackup.data.pendingBudgetOperations;
+    const legacyBackup = backupAtVersion(backup, 3);
     delete legacyBackup.data.incomeCategories;
     delete legacyBackup.data.incomes;
     delete legacyBackup.data.pendingIncomeSyncOperations;
