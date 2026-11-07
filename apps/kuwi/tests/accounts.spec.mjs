@@ -1,5 +1,9 @@
 import { chromium, expect, test as base, webkit } from "@playwright/test";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startServer } from "../scripts/serve.mjs";
 
 const populatedV1 = readFileSync(
@@ -22,7 +26,6 @@ const legacyV3Shell = readFileSync(
 const legacyV3Worker = readFileSync(
   new URL("./fixtures/legacy-v3-worker.js", import.meta.url),
 );
-
 const test = base.extend({
   storageFault: async ({}, provide) => {
     await provide({ current: null, legacyBuild: false });
@@ -104,28 +107,71 @@ const test = base.extend({
     });
     await new Promise((resolve) => server.once("listening", resolve));
     try {
-      await provide(`http://127.0.0.1:${server.address().port}`);
+      // WebKit shares OPFS by origin across persistent profiles and test runs.
+      const host = `kuwi-${randomUUID()}.localhost`;
+      await provide(`http://${host}:${server.address().port}`);
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     }
   },
-  context: async ({ browser, browserName, baseURL }, provide, testInfo) => {
-    const context = browserName === "webkit"
-      ? await webkit.launchPersistentContext(testInfo.outputPath("profile"), { baseURL })
-      : await browser.newContext({ baseURL });
+  /** Give each journey isolated storage; WebKit needs a persistent profile for OPFS. */
+  context: async ({ browser, browserName, baseURL }, provide) => {
+    const profile = browserName === "webkit"
+      ? await mkdtemp(join(tmpdir(), "kuwi-webkit-"))
+      : null;
+    let context;
     try {
+      if (browserName === "webkit")
+        context = await webkit.launchPersistentContext(profile, { baseURL });
+      else context = await browser.newContext({ baseURL });
       await provide(context);
     } finally {
-      await context.close();
+      try {
+        await context?.close();
+      } finally {
+        if (profile) await rm(profile, { recursive: true, force: true });
+      }
     }
   },
 });
+
+/**
+ * Enter first-run setup or report the local-storage startup screen.
+ * @param page - Browser page after navigation.
+ * @returns Resolves after the first-run button is clicked.
+ * @throws {Error} If local storage fails to open or startup never reaches a usable screen.
+ */
+async function continueOffline(page) {
+  const startButton = page.getByRole("button", {
+    name: "Continue offline",
+    exact: true,
+  });
+  const retryButton = page.getByRole("button", {
+    name: "Retry opening",
+    exact: true,
+  });
+  try {
+    await expect(startButton.or(retryButton)).toBeVisible();
+  } catch (error) {
+    const screen = await page.locator("body").innerText().catch(() => "");
+    throw new Error(
+      `App startup did not reach first-run setup at ${page.url()}. Screen: ${screen || "empty"}. ${error.message}`,
+    );
+  }
+  if (await retryButton.isVisible()) {
+    throw new Error(
+      `Local storage failed to open. Screen: ${await page.locator("body").innerText()}`,
+    );
+  }
+  await startButton.click();
+}
 
 /** Complete visible first-run setup with the selected currency and opening balance.
  * @param page - Browser page to drive through the first-run form.
  * @param options - Optional preferred name, currency, and opening amount text.
  * @returns Resolves after the saved account list appears.
+ * @throws {Error} If local storage fails to open before setup starts.
  */
 async function finishSetup(page, {
   name = "Anthony",
@@ -133,7 +179,7 @@ async function finishSetup(page, {
   openingBalance = "0",
 } = {}) {
   await page.goto("/");
-  await page.getByRole("button", { name: "Continue offline" }).click();
+  await continueOffline(page);
   await page.getByLabel("Preferred name").fill(name);
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await page.getByRole("button", { name: "Skip introduction" }).click();
@@ -162,8 +208,10 @@ test("a populated legacy build updates on the same origin and reopens offline", 
   storageFault,
 }, testInfo) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
+  const profile = testInfo.outputPath("legacy-update-profile");
+  await rm(profile, { recursive: true, force: true });
   const context = await browserType.launchPersistentContext(
-    testInfo.outputPath("legacy-update-profile"),
+    profile,
     { baseURL },
   );
   try {
@@ -218,8 +266,10 @@ test("a legacy expense and backup survive the shell update", async ({
   storageFault,
 }, testInfo) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
+  const profile = testInfo.outputPath("legacy-expense-update-profile");
+  await rm(profile, { recursive: true, force: true });
   const context = await browserType.launchPersistentContext(
-    testInfo.outputPath("legacy-expense-update-profile"),
+    profile,
     { baseURL },
   );
   try {
@@ -601,6 +651,11 @@ test("an edit with a lost reply reuses its saved operation ID", async ({
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByRole("status")).toContainText("Transaction updated");
   await expect(page.getByText("₱980.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Edit Coffee" }).click();
+  await page.getByLabel("Transaction amount").fill("22");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("status")).toContainText("Transaction updated");
+  await expect(page.getByText("₱978.00", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Back to account" }).click();
   await page.getByRole("button", { name: "Back to accounts" }).click();
@@ -609,16 +664,27 @@ test("an edit with a lost reply reuses its saved operation ID", async ({
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup.data.expenses).toHaveLength(1);
-  expect(backup.data.expenses[0].amount_minor).toBe(2000);
+  expect(backup.data.expenses[0].amount_minor).toBe(2200);
   expect(backup.data.pendingSyncOperations).toEqual([
     { operation_id: backup.data.expenses[0].id },
   ]);
-  expect(backup.data.pendingTransactionOperations).toHaveLength(1);
-  expect(backup.data.pendingTransactionOperations[0]).toMatchObject({
-    transaction_kind: "expense",
-    operation_type: "edit",
-    transaction_id: backup.data.expenses[0].id,
-  });
+  expect(backup.data.pendingTransactionOperations).toHaveLength(2);
+  expect(
+    new Set(
+      backup.data.pendingTransactionOperations.map(
+        ({ operation_id }) => operation_id,
+      ),
+    ).size,
+  ).toBe(2);
+  expect(backup.data.pendingTransactionOperations).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        transaction_kind: "expense",
+        operation_type: "edit",
+        transaction_id: backup.data.expenses[0].id,
+      }),
+    ]),
+  );
 });
 
 test("a populated v4 database migrates while keeping account and transaction identities", async ({
