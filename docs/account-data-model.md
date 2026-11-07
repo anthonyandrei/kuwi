@@ -45,17 +45,17 @@ Credit accounts; the recovered income form does not offer Assets accounts.
 | Relation | Primary key | Stored facts and references |
 | --- | --- | --- |
 | `currencies` | `code` | `decimal_places` for each supported currency. |
-| `profiles` | `id` | `preferred_name`, `preferred_currency` → `currencies.code`. |
+| `profiles` | `id` | `preferred_name`, `preferred_currency` → `currencies.code`, monthly budget cycle start day from 1 through 31 (default 1). |
 | `accounts` | `id` | `name`, `type`, `currency_code` → `currencies.code`, optional `credit_limit_minor`, `created_at`. |
 | `account_adjustments` | `id` | `account_id` → `accounts.id`, signed `amount_minor`, `adjustment_type`, `created_at`. |
 | `setup` | `id` (fixed at 1) | `profile_id` → `profiles.id`, `first_account_id` → `accounts.id`, `completed_at`. |
 | `pending_operations` | `id` | `account_id` → `accounts.id`, `operation_type`, SHA-256 `request_fingerprint`, `created_at`. |
 | `categories` | `id` | Canonical label and display order for built-in expense categories. |
 | `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, optional `transfer_id` → `transfers.id`, positive minor units, date, optional note, planned flag, optional scheduled amount, `created_at`. |
-| `pending_sync_operations` | `operation_id` | `operation_id` → `expenses.id`; marks an expense creation for local sync. |
+| `pending_sync_operations` | `operation_id` | `operation_id` → `expenses.id`; marks an expense creation for local sync and stores its original normalized request and submission date for retries. Migrated markers and linked transfer-fee markers can have a null receipt. |
 | `income_categories` | `id` | Canonical label and display order for built-in income categories. |
 | `incomes` | `id` | `account_id` → `accounts.id`, optional `category_id` → `income_categories.id`, nonnegative minor units, date, optional note, planned flag, optional scheduled amount, `created_at`. |
-| `pending_income_sync_operations` | `operation_id` | `operation_id` → `incomes.id`; marks an income creation for local sync. |
+| `pending_income_sync_operations` | `operation_id` | `operation_id` → `incomes.id`; marks an income creation for local sync and stores its original normalized request and submission date for retries. Migrated markers can have a null receipt. |
 | `transfers` | `id` | Account references, positive source principal and received amount in their respective minor units, canonical parsed rate, date, optional note, `created_at`. |
 | `expenses.transfer_id` | nullable foreign key | `transfer_id` → `transfers.id`; identifies the linked transfer-fee expense. The fee amount and category are stored on the expense. |
 | `pending_transfer_operations` | `operation_id` | `operation_id` → `transfers.id`, SHA-256 request fingerprint; marks the transfer for local sync and stable retries. |
@@ -64,7 +64,7 @@ Credit accounts; the recovered income form does not offer Assets accounts.
 | `pending_budget_operations` | `operation_id` | Category ID, save/clear type, SHA-256 request fingerprint, and creation time for stable retries and future local sync. |
 
 The non-key dependencies are `code → decimal_places`, `profile id → preferred
-name, preferred currency`, `account id → name, type, currency, credit limit,
+name, preferred currency, monthly cycle start day`, `account id → name, type, currency, credit limit,
 creation time`, `adjustment id → account id, amount, kind, creation time`,
 `operation id → account id, operation type, request fingerprint, creation
 time`, `category id → label, display order`, `expense id → account, category,
@@ -82,6 +82,12 @@ currencies and precision come from their account references. A fee is an
 expense in the `fees` category whose `transfer_id`
 points to the transfer. The transfer does not store a second fee amount. The
 backup contract exposes a derived fee amount for compatibility.
+
+The received amount is authoritative when the user enters it directly. Kuwi
+stores the implied canonical rate as a description of that manual amount; it
+does not require multiplying the rate back to reproduce the exact minor units.
+When the user enters a rate, Kuwi derives the received amount with decimal
+arithmetic and truncates it to destination precision.
 
 `budgets.category_id → amount_milli, type, percentage_basis_points, interval,
 rollover_enabled, rollover_started_at, biweekly_start_date, biweekly_end_date`.
@@ -105,11 +111,13 @@ adjustment and transaction facts.
 
 Budgets cover all accounts. The calculator selects ordinary expenses by
 category and inclusive period, then derives fixed or income-based limits and
-progress. Transfer principal lives only in `transfers` and is excluded. A
-positive transfer fee is the linked `fees` expense, so it contributes once.
-Percentage bases include actual incomes across accounts and categories, with
-planned income excluded. Kuwi has no FX quote source; a qualifying entry in a
-different currency makes progress unavailable until quotes exist.
+progress. Monthly periods use the profile's saved start day, defaulting to 1;
+days beyond a month's length clamp to that month's last day. Transfer principal
+lives only in `transfers` and is excluded. A positive transfer fee is the
+linked `fees` expense, so it contributes once. Percentage bases include actual
+incomes across accounts and categories, with planned income excluded. Choosing
+an FX quote source that supports offline progress remains a product decision.
+Until then, a qualifying entry in another currency makes progress unavailable.
 
 ## Write and retry contract
 
@@ -131,8 +139,15 @@ writing a delete receipt in the same transaction. The receipt fingerprint
 supports stable retries and rejects an operation ID reused with different
 content. Balances are derived from the resulting rows, so a move between
 accounts updates both balances from one committed replacement. Account changes
-in this form require the same currency. Planned income can be deleted, while
-its edit remains blocked pending verification of its posting transition.
+in this form require the same currency. Planned entries remain unposted through
+due dates and edits until the user chooses Log. Moving a future plan to today
+or earlier posts it; editing a due or overdue plan keeps it planned.
+
+Expense and income create receipts preserve the normalized request, planned
+intent, and local submission date. An unchanged retry keeps the original intent
+after the due date, logging, or correction, while reusing its ID with changed
+content fails. A legacy marker without a receipt is checked against its current
+transaction row.
 
 ## Migration
 
@@ -158,8 +173,10 @@ planned or transfer columns and widening old transaction receipts to accept
 `log`. Existing same-currency transfers receive
 equal source and received amounts and rate `1`; existing currency-aware values
 remain unchanged. Migrations run transactionally and preserve populated stores
-if a backfill fails. Transfer fees stay as linked expenses, and transfer
-principal remains a separate ledger fact.
+if a backfill fails. Version 10 adds the monthly cycle preference and nullable
+create-request receipts; existing sync markers retain null receipts. Transfer
+fees stay as linked expenses, and transfer principal remains a separate ledger
+fact.
 
 The adjustment table currently accepts initial balances only. Manual balance
 adjustments, account deletion, loan schedules, investments, and cloud-sync

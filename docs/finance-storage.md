@@ -44,15 +44,17 @@ receipts; existing marker rows keep null receipts and their existing data.
 ## Ledger writes and balances
 
 An expense and its pending sync marker commit together. Income and its pending
-sync marker use the same transaction boundary. Each create marker preserves the
-normalized original request, planned intent, and local date at submission after
-a transaction is logged or corrected. A retry on or after a future plan's due
-date can still match its original intent. Same-ID changed content fails. Legacy
-records without a create receipt use their current row for retry checks.
-Transfers write the source
-principal, destination received amount, canonical rate, optional linked fee
-expense, fee sync marker, and pending transfer operation in one immediate
-transaction. The operation ID remains stable across retries. An identical
+sync marker use the same transaction boundary. Expense and income form
+submissions preserve the normalized original request, planned intent, and local
+date at submission after a transaction is logged or corrected. A retry on or
+after a future plan's due date can still match its original intent. Same-ID
+changed content fails. Migrated records without a create receipt use their
+current row for retry checks; linked transfer-fee expenses use the transfer
+receipt.
+Transfers write the source principal, destination received amount, canonical
+rate, optional linked fee expense, fee sync marker, and pending transfer
+operation in one immediate transaction. The operation ID remains stable across
+retries. An identical
 retry returns the saved ledger; reusing the ID with different transfer details
 fails. A failed write rolls back all transfer effects.
 
@@ -88,10 +90,10 @@ preference is editable in the budget workspace and included in backups.
 Progress comes from eligible expense and income rows each time it is read.
 Expenses count across accounts by category and inclusive period. Monthly periods
 use the configured cycle start day. Actual income across all accounts and
-categories forms the percentage base; planned income is excluded. Planned expenses also stay out of
-spending progress until logged. Transfers do not contribute their
-principal to spending. A transfer fee is already stored once as a linked Fees
-expense and counts once when it meets the budget date and eligibility rules.
+categories forms the percentage base; planned income is excluded. Planned
+expenses stay out of spending progress until logged. Transfers do not contribute
+their principal to spending. A transfer fee is already stored once as a linked
+Fees expense and counts once when it meets the budget date and eligibility rules.
 Kuwi currently has no FX quote source, so progress is unavailable when
 qualifying expenses or income use a currency different from the profile's
 preferred currency.

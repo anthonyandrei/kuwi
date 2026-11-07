@@ -87,8 +87,9 @@ an explicit Log action. Tarsi iPhone 2.5.9 acceptance remains pending. Kuwi's
 budget screen covers built-in expense categories; custom and hidden categories,
 subcategory budgets, and Pro entitlements are outside the current app.
 Cross-currency progress stays unavailable because Kuwi has no exchange-quote
-source. Monthly periods start on day 1; Kuwi does not expose the WEB reference's
-configurable start day. Physical iPhone acceptance for planned entries,
+source. Monthly budget cycles use a saved start day from 1 to 31, defaulting to
+day 1. Short months use their last day when the selected day does not exist.
+Physical iPhone acceptance for planned entries,
 transfers, budgets, and backup round trips remains pending.
 
 The six observed currency tiles are PHP, USD, EUR, GBP, JPY, and TWD. PHP, Cash,
@@ -132,8 +133,8 @@ No Cloudflare product deployment or storage migration was needed.
 ## Validation on 2026-11-08
 
 `npm exec --yes --package=pnpm@11.25.0 -- pnpm check` passed lint, TypeScript,
-the static build, ten unit tests, and 156 Playwright journeys: 78 in Chromium
-and 78 in disk-backed WebKit. WebKit retained OPFS data for the same origin
+the static build, ten unit tests, and 176 Playwright journeys: 88 in Chromium
+and 88 in disk-backed WebKit. WebKit retained OPFS data for the same origin
 after a persistent context closed and a second profile opened. Each journey
 uses a unique `.localhost` hostname so a reused port cannot expose another
 journey's database.

@@ -122,7 +122,7 @@ function migrateV1() {
   });
 }
 
-/** Add ordinary expenses and their pending sync records to the account schema. */
+/** Add expense categories, rows, and nullable create receipts in the v2-to-v3 migration. */
 function migrateExpenses() {
   transaction(() => {
     db.exec(`
@@ -156,7 +156,7 @@ function migrateExpenses() {
 }
 
 /**
- * Migrate v3 to v4 in one transaction, adding income records.
+ * Migrate v3 to v4 in one transaction, adding income records and nullable create receipts.
  * @returns {void} The database is left at v4 after commit.
  * @throws {Error} SQLite failures roll back the migration and retain v3 data.
  */
@@ -551,9 +551,9 @@ function state() {
   return first ? { ...first, accounts: accountList() } : null;
 }
 
-/** Read category budget definitions and derive current progress from expense and income rows.
- * @returns {object} Preferred currency, monthly cycle day, expense categories, per-budget progress, and aggregate summary; empty before setup.
- * Cross-currency totals are marked unavailable because this store has no FX quote source.
+/** Read budget definitions and derive progress using the profile's monthly cycle day.
+ * @returns {object} Preferred currency, cycle day from 1 through 31, categories, budget progress, and summary; before setup the currency is null and cycle day is 1.
+ * Cross-currency totals are unavailable because this store has no FX quote source.
  * @throws {Error} A ledger query or budget calculation fails.
  */
 function budgetState() {
@@ -877,6 +877,7 @@ function requireTimestamp(value, description) {
 
 /** Validate an optional immutable create-request receipt from a v10 backup.
  * @param {object} marker - Expense or income sync marker with its original request.
+ *   A null receipt is valid for migrated rows and linked transfer-fee expenses.
  * @param {"expense"|"income"} kind - Transaction kind that owns the marker.
  * @returns {void} Returns after the receipt is canonical and internally valid.
  * @throws {Error} The receipt is malformed or its normalized fields are invalid.
@@ -1598,6 +1599,9 @@ function createIncome(args) {
  * @param {object} args - Stable operation ID, eligible source and destination IDs, positive source
  *   and received amounts in their account minor units, positive destination-per-source rate,
  *   nonnegative source-currency fee, valid date including future dates, and optional note.
+ *   For cross-currency received-amount entry, the entered destination amount is authoritative
+ *   and the implied rate describes it. Rate entry calculates and truncates the destination amount.
+ *   Same-currency transfers require equal amounts and a rate of one.
  * @returns {Promise<object>} Refreshed accounts, source ledger, and whether this was a replay.
  * @throws {Error} Invalid fields or accounts, insufficient available funds, conflicting retry, or failed write.
  */
@@ -1977,6 +1981,7 @@ async function updateAccount(args) {
 
 /**
  * Save first-run profile, account, optional starting adjustment, and retry record atomically.
+ * The profile's monthly budget cycle starts on day 1.
  * A completed setup is returned unchanged when onboarding is submitted again.
  * @param {object} args - Validated onboarding fields and stable setup operation ID.
  * @returns {Promise<object>} The saved setup and its accounts.
