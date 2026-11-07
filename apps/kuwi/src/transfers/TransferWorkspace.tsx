@@ -34,6 +34,7 @@ function formatMoney(minor: number, currency: string, digits: number): string {
  * @param initialAccount - Account selected before the user opens transfers.
  * @param onBack - Return to the selected account without saving.
  * @param onTransfer - Publish the committed account list and source ledger.
+ * @returns The transfer form for the selected currency.
  */
 export function TransferWorkspace({
   accounts,
@@ -72,7 +73,9 @@ export function TransferWorkspace({
       : Math.max(0, selectedSource.balance_minor)
     : 0;
 
-  /** Validate and submit with an operation ID stable across an unchanged retry. */
+  /** Validate and submit with an operation ID stable across an unchanged retry.
+   * @returns Resolves after showing validation/storage feedback or publishing a saved transfer.
+   */
   async function submitTransfer() {
     if (!selectedSource || !selectedDestination) {
       setError("Add an eligible debit account in the same currency first.");

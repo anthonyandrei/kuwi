@@ -4,7 +4,9 @@ The local finance app is separate from the disposable storage probe. It uses
 Expo, React Native Web, Expo Router, Reanimated, and the supplied quokka
 reference with cream and sage colors. It supports local setup, accounts,
 expenses, ordinary income, same-currency transfers, category budgets, and
-versioned backup/restore. Local use requires no sign-in.
+versioned backup/restore. Transaction history supports editing or deleting
+posted expenses and income; planned-income editing remains blocked pending
+rule verification. Local use requires no sign-in.
 
 From the repository root:
 
@@ -30,11 +32,14 @@ After building, rerun the product journeys from the repository root with
 `pnpm test`. The server resolves its export relative to its script, so it also
 works when launched from the app directory.
 
-Tests use real OPFS, an independent loopback origin for each journey, and disk
-profiles for WebKit. A local test server can alter the served worker to inject
-write/migration failures, interrupt an active transaction, or lose a save reply. These controls are absent from
-the exported production app. The tests assert visible setup, balances,
-rollback/retry, ownership handoff, and offline reopening after browser closure.
+Tests use real OPFS, a unique loopback hostname and port for each journey, and
+a fresh disk-backed profile for each WebKit journey. The unique host keeps
+WebKit's origin-scoped OPFS data isolated across test runs, even after a profile
+is removed. A local test server can alter the served worker to inject write or
+migration failures, interrupt an active transaction, or lose a save reply.
+These controls are absent from the exported production app. The tests assert
+visible setup, balances, transaction corrections and deletions, rollback and
+retry, ownership handoff, and offline reopening after browser closure.
 
 Upgrade journeys serve prior product shells and workers first, then switch the
 same origin to the current app. The setup-era v1 build checks schema migration,
@@ -123,12 +128,20 @@ No Cloudflare product deployment or storage migration was needed.
 
 ## Validation on 2026-11-07
 
-`npm exec --yes --package=pnpm@11.25.0 -- pnpm check` passed lint, TypeScript,
-the static build, and all 80 Playwright journeys, 40 each in Chromium and
-WebKit, against real OPFS storage. Coverage includes income posting and retries,
-backup downloads and file selection, integrity and reference checks, rollback,
-migration recovery, offline reopening, and another write. Physical iPhone Files
-and income acceptance remain pending.
+Before category budgets were added, `npm exec --yes --package=pnpm@11.25.0 --
+pnpm check` passed lint, TypeScript, the static build, and all 90 Playwright
+journeys against real OPFS storage: 45 in Chromium and 45 in WebKit. WebKit
+retained OPFS data for the same origin after a persistent context closed and a
+second profile opened. The test servers use a unique `.localhost` hostname for
+each journey, so separate runs cannot reopen another journey's database
+through a reused port.
+
+Coverage includes income posting and retries, transaction corrections and
+deletion, backup downloads and file selection, integrity and reference checks,
+rollback, migration recovery, offline reopening, and another write. Physical
+iPhone Files and income acceptance remain pending. The new budget journeys are
+waiting for a fresh sequential browser run because concurrent runs can time
+out during WebKit startup.
 
 Physical iPhone installation, offline reopening, and populated Safari ownership
 handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2

@@ -1117,10 +1117,10 @@ async function restoreBackup(backup) {
 }
 
 /**
- * Return one account, all account balances, canonical categories, and its transaction history.
+ * Return one account, all account balances, canonical categories, transactions, and transfers.
  * @param {string} [accountId] - Account ID; omitted to use the setup account.
  * @returns {object|null} The selected account, full account list, category lists, and
- *   that account's transactions; null when the requested account is unavailable.
+ *   that account's ledger rows and transfer history; null when the account is unavailable.
  */
 function readLedger(accountId) {
   const firstAccountId = rows("SELECT first_account_id FROM setup WHERE id=1")[0]?.first_account_id;

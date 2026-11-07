@@ -51,7 +51,7 @@ Credit accounts; the recovered income form does not offer Assets accounts.
 | `setup` | `id` (fixed at 1) | `profile_id` → `profiles.id`, `first_account_id` → `accounts.id`, `completed_at`. |
 | `pending_operations` | `id` | `account_id` → `accounts.id`, `operation_type`, SHA-256 `request_fingerprint`, `created_at`. |
 | `categories` | `id` | Canonical label and display order for built-in expense categories. |
-| `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, positive minor units, date, optional note, `created_at`. |
+| `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, optional `transfer_id` → `transfers.id`, positive minor units, date, optional note, `created_at`. |
 | `pending_sync_operations` | `operation_id` | `operation_id` → `expenses.id`; marks an expense creation for local sync. |
 | `income_categories` | `id` | Canonical label and display order for built-in income categories. |
 | `incomes` | `id` | `account_id` → `accounts.id`, optional `category_id` → `income_categories.id`, nonnegative minor units, date, optional note, planned flag, `created_at`. |
@@ -68,8 +68,9 @@ name, preferred currency`, `account id → name, type, currency, credit limit,
 creation time`, `adjustment id → account id, amount, kind, creation time`,
 `operation id → account id, operation type, request fingerprint, creation
 time`, `category id → label, display order`, `expense id → account, category,
-amount, date, note, creation time`, and `income id → account, optional
-category, amount, date, note, planned state, creation time`. Transaction
+optional transfer reference, amount, date, note, creation time`, and
+`income id → account, optional category, amount, date, note, planned state,
+creation time`. Transaction
 operation IDs determine the kind, transaction ID, edit/delete type, fingerprint,
 and creation time. This relation has no foreign key because delete receipts must
 outlive their transaction rows. `setup.id` identifies one profile and its first
@@ -86,8 +87,8 @@ expense and income rows; no spending total is stored in the budget relation.
 
 `transfer id → source account, destination account, principal, date, note, and
 creation time`. A fee is an expense in the `fees` category whose `transfer_id`
-points to the transfer. The transfer does not store a second fee amount. The
-backup contract exposes a derived fee amount for compatibility.
+points to the transfer. The transfer does not store a second fee amount.
+Backups include a derived `fee_amount_minor` field from the linked expense.
 
 Balances combine `account_adjustments`, posted expense and income effects, and
 transfer principal effects; the app does not store another mutable balance on

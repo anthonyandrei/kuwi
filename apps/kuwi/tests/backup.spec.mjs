@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { rm } from "node:fs/promises";
 import { test as base, expect, webkit, chromium } from "@playwright/test";
 
 const test = base.extend({
@@ -19,7 +20,9 @@ const test = base.extend({
     });
     await new Promise((resolve) => server.once("listening", resolve));
     try {
-      await provide(`http://127.0.0.1:${server.address().port}`);
+      // WebKit shares OPFS by origin across persistent profiles and test runs.
+      const host = `kuwi-${randomUUID()}.localhost`;
+      await provide(`http://${host}:${server.address().port}`);
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
@@ -30,10 +33,32 @@ const test = base.extend({
 /** Complete visible first-run setup with the independent PHP 1,000 test example.
  * @param {import("@playwright/test").Page} page - Browser page to drive.
  * @returns {Promise<void>} Resolves after the saved balance appears.
+ * @throws {Error} If local storage fails to open before setup starts.
  */
 async function finishSetup(page) {
   await page.goto("/");
-  await page.getByRole("button", { name: "Continue offline", exact: true }).click();
+  const startButton = page.getByRole("button", {
+    name: "Continue offline",
+    exact: true,
+  });
+  const retryButton = page.getByRole("button", {
+    name: "Retry opening",
+    exact: true,
+  });
+  try {
+    await expect(startButton.or(retryButton)).toBeVisible();
+  } catch (error) {
+    const screen = await page.locator("body").innerText().catch(() => "");
+    throw new Error(
+      `App startup did not reach first-run setup. Screen: ${screen || "empty"}. ${error.message}`,
+    );
+  }
+  if (await retryButton.isVisible()) {
+    throw new Error(
+      `Local storage failed to open. Screen: ${await page.locator("body").innerText()}`,
+    );
+  }
+  await startButton.click();
   await page.getByLabel("Preferred name", { exact: true }).fill("Anthony");
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await page.getByRole("button", { name: "Skip introduction", exact: true }).click();
@@ -93,6 +118,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 }, testInfo) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
   const directory = testInfo.outputPath("backup-browser-profile");
+  await rm(directory, { recursive: true, force: true });
   let context = await browserType.launchPersistentContext(directory, { baseURL });
   try {
     let page = await context.newPage();
@@ -440,8 +466,10 @@ test("a failed restore keeps saved transactions and their edit receipts", async 
 }, testInfo) => {
   storageFault.failRestore = true;
   const browserType = browserName === "webkit" ? webkit : chromium;
+  const directory = testInfo.outputPath("failed-backup-browser-profile");
+  await rm(directory, { recursive: true, force: true });
   const context = await browserType.launchPersistentContext(
-    testInfo.outputPath("failed-backup-browser-profile"),
+    directory,
     { baseURL },
   );
   try {
