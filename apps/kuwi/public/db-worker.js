@@ -386,7 +386,7 @@ async function backupDigest(body) {
 }
 
 /** Snapshot every v4 source relation in deterministic order and attach its integrity digest.
- * @returns {Promise<object>} A complete v1/v3 Kuwi backup envelope.
+ * @returns {Promise<object>} A complete v1/v4 Kuwi backup envelope.
  * @throws {Error} SQLite reads or Web Crypto digest generation fail.
  */
 async function createBackup() {
@@ -816,7 +816,7 @@ function createExpense(args) {
  * The operation ID is also the income ID. Future dates are planned and do not
  * affect the balance; only those entries may have a zero amount. Identical
  * retries return the saved ledger, while changed content under the same ID fails.
- * @param {object} args - Operation/account IDs, optional category, amount in minor units, date, and optional note.
+ * @param {object} args - Operation ID, Debit/Credit account ID, optional category ID, nonnegative account-currency minor units, valid date, and optional note.
  * @returns {{ledger: object, replayed: boolean}} The refreshed ledger and whether this was a retry.
  * @throws {Error} Invalid fields, unavailable references, a conflicting retry, or a failed database write.
  */
