@@ -11,6 +11,13 @@ const test = base.extend({
       if (path === "/sw.js" && storageFault.disableCache) return "";
       if (path !== "/db-worker.js" || !storageFault.current) return bytes;
       const source = bytes.toString();
+      if (storageFault.current === "quota") {
+        storageFault.current = null;
+        return source.replace(
+          'const sqlite = await sqlite3InitModule({',
+          'throw new DOMException("Storage quota exceeded. Free space and retry.", "QuotaExceededError"); const sqlite = await sqlite3InitModule({',
+        );
+      }
       if (storageFault.current === "write")
         return source.replace(
           /db\.exec\(\{\s*sql: "INSERT INTO accounts VALUES\([^)]+debit[^)]*\)"/,
@@ -87,6 +94,24 @@ const test = base.extend({
       await context.close();
     }
   },
+});
+
+test("a quota failure stays visible and reopening keeps the saved account", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Close database", exact: true }).click();
+
+  storageFault.current = "quota";
+  await page.getByRole("button", { name: "Retry opening", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Storage quota exceeded");
+
+  await page.getByRole("button", { name: "Retry opening", exact: true }).click();
+  await expect(page.getByText("Welcome, Anthony.", { exact: true })).toBeVisible();
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
 });
 /**
  * Follow visible setup to the account form.
