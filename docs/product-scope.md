@@ -54,7 +54,7 @@ Updated: 2026-11-07
 
 ## Decisions still open
 
-- Remaining browser storage acceptance on the integrated iPhone app, sync behavior, and AI services.
+- Storage acceptance for later finance workflows, sync behavior, and AI services.
 - Continue inspecting Tarsi's shipped artifacts to establish behavior and
   determine whether any frontend code or assets can be reused.
 - Detailed screen flows, animation behavior, initialization rules, and any
@@ -93,9 +93,10 @@ Issue #2 has a working local setup and first-account implementation in
 `apps/kuwi`. Anthony selected Vercel and authorized deployment on 2026-11-07.
 The deployed app is https://kuwi-ten.vercel.app. Browser persistence journeys
 and HTTPS setup/offline checks passed; see [the app README](../apps/kuwi/README.md)
-for coverage and limits. Physical iPhone installation, offline reopening,
-ownership, layout, motion, and keyboard checks remain outstanding, so #2 stays
-open. Home, grouped Wallet, additional account editing, and the remaining
+for coverage and limits. Physical iPhone installation, full offline reopening,
+and populated Safari ownership handoff passed. An iOS 27.2 iPhone simulator
+completed setup with the software keyboard and custom number pad. Setup
+transitions worked; identical Tarsi animation timing is not established. Home, grouped Wallet, additional account editing, and the remaining
 finance workflows are not implemented. The Cloudflare storage probe remains
 separate. Clerk and Convex have not been provisioned for the app.
 

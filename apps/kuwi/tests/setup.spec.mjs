@@ -55,9 +55,13 @@ const test = base.extend({
     }
   },
 });
-/** Follow visible local setup to the account form. */
-async function setup(page) {
-  await page.goto("/");
+/**
+ * Follow visible setup to the account form.
+ * @param {import("@playwright/test").Page} page Browser page to drive.
+ * @param {boolean} [navigate=true] Open the app first; false continues after startup retry.
+ */
+async function setup(page, navigate = true) {
+  if (navigate) await page.goto("/");
   await page
     .getByRole("button", { name: "Continue offline", exact: true })
     .click();
@@ -307,8 +311,17 @@ test("worker interruption during setup rolls back before retry", async ({
     "Save confirmation timed out",
   );
   storageFault.current = null;
-  await page.reload();
-  await setup(page);
+  // Chromium can release a terminated worker's lock after the timeout is displayed.
+  // Exercise the visible retry until the new worker owns the preserved database.
+  await page.goto("/");
+  const retry = page.getByRole("button", { name: "Retry opening", exact: true });
+  await expect(async () => {
+    if (await retry.isVisible()) await retry.click();
+    await expect(
+      page.getByRole("button", { name: "Continue offline", exact: true }),
+    ).toBeVisible({ timeout: 1000 });
+  }).toPass({ timeout: 20000 });
+  await setup(page, false);
   await page
     .getByRole("button", { name: "Save my account", exact: true })
     .click();

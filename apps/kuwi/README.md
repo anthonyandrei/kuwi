@@ -80,27 +80,34 @@ Build Output configuration. Local Vercel credentials and environment files
 are ignored. The earlier Cloudflare storage probe remains a separate test.
 No Cloudflare product deployment or storage migration was needed.
 
-## Remaining acceptance work
-
-Home Screen installation and setup have passed on the physical iPhone.
-Populated Safari ownership handoff and complete layout/motion and
-software-keyboard comparison remain required before closing
-#2. Desktop WebKit passes cannot replace those checks. This app does not
-implement backup/restore or later finance journeys, which belong to subsequent
-work under the parent issue.
-
 ## Validation on 2026-11-07
 
-The product export, TypeScript, JavaScript syntax, and diff checks pass.
-The full Chromium/WebKit suite passed 16 checks. After separating the lost-reply
-and browser-closure journeys to isolate fault injection from precaching, all
-four focused checks passed in both engines. The suite now contains nine
-journeys per engine. The PHP keypad example and interruption during an active
-transaction passed in both engines in the full run.
+TypeScript, JavaScript syntax, and diff checks pass. All 18 Chromium/WebKit
+journeys passed, including interruption during an active transaction. The
+interruption test exercises visible Retry opening while Chromium releases the
+terminated worker's ownership lock, then verifies a single saved account.
+Standards and spec reviews found no actionable findings in the final test change.
+The app had no ESLint configuration. Expo's automatic lint setup failed its own
+version check; running the generated configuration directly reported the
+existing synchronous state reset in the startup effect (`index.tsx:54`). The
+automatically generated configuration and dependency changes were removed.
+Lint is not a passing check.
 
-Standards review found no actionable code defects. Spec review prompted the
-save timeout, visible retry, and interrupted-transaction test. The installed
-iPhone checks above remain outstanding. These results do not close issue #2.
+Physical iPhone installation, offline reopening, and populated Safari ownership
+handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2
+(build 24B8117) completed the deployed Safari setup using the software keyboard.
+The name field remained visible, and the keyboard's Next key advanced to the
+introduction. Its page Next button sat under the keyboard accessory bar;
+keyboard Next or dismissal provided a working route forward. The currency list
+scrolled to Next and Back. The decimal keyboard accepted input, its dismissal
+restored the form, and the custom number pad fit with Done reachable. Saving
+showed Anthony's Cash account at PHP 0.00. No transition became stuck.
+
+Kuwi uses the observed sequence and defaults with its own cream/sage layout and
+quokka artwork. This verifies usable setup transitions, not identical Tarsi
+animation timing or artwork. Blank-name validation and non-PHP precision still
+come from the separate shipped-web evidence, not new native observations.
+Backup/restore and later finance journeys remain work under the parent issue.
 
 ## Vercel verification on 2026-11-07
 
@@ -119,13 +126,16 @@ number pad displayed 1234.56 after entering 1234.567. The amount was returned
 to zero before saving, and the app showed Anthony's Cash account at PHP 0.00.
 No sign-in was used. Fast text injection through Mirroring scrambled input;
 individual key presses entered the intended name. This does not verify the
-phone's software keyboard. Anthony then confirmed a successful full closure and Home Screen reopening
+phone's software keyboard. Anthony then confirmed a successful full closure
+and Home Screen reopening
 in Airplane Mode with Wi-Fi off: the account remained at PHP 0.00 and setup
 did not repeat. After connectivity was restored, Mirroring visibly showed the
 retained account.
 
 In Safari, duplicating the Kuwi tab showed Database busy. Closing the owner
-tab and selecting Retry opening in the second tab succeeded. This handoff
-used a fresh Safari store, so populated Safari data retention across handoff
-is still unverified on the phone. Safari remained at fresh setup while the
-installed app retained its account, consistent with separate local stores.
+tab and selecting Retry opening in the second tab succeeded. The first handoff
+used a fresh Safari store, separate from the initialized Home Screen store.
+A subsequent run saved Anthony and Cash at PHP 0.00 in Safari, duplicated the
+tab, verified Database busy, closed the owner tab, and retried. The second tab
+opened the saved account without repeating setup. Populated Safari handoff
+therefore passed.
