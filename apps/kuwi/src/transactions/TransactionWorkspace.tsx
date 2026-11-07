@@ -37,7 +37,7 @@ function formatMoney(minor: number, currency: string, digits: number): string {
 }
 
 /**
- * Render an expense or income form, or the combined history with correction and deletion actions.
+ * Render an expense or income form, or history with corrections, deletions, and both transfer amounts.
  * @param mode - Entry type or history view to show.
  * @param ledger - Selected account, all account balances, canonical categories, and saved transactions.
  * @param onBack - Return to the selected account screen.
@@ -327,14 +327,33 @@ export function TransactionWorkspace({
                     </Text>
                     <Text style={styles.meta}>{item.transfer.date} · {account.name}</Text>
                     {item.transfer.note ? <Text style={styles.meta}>{item.transfer.note}</Text> : null}
+                    <Text style={styles.meta}>
+                      Sent {formatMoney(item.transfer.amount_minor, item.transfer.from_currency_code, item.transfer.from_decimal_places)} {item.transfer.from_currency_code}
+                      {" · received "}
+                      {formatMoney(item.transfer.received_amount_minor, item.transfer.to_currency_code, item.transfer.to_decimal_places)} {item.transfer.to_currency_code}
+                    </Text>
+                    {item.transfer.from_currency_code !== item.transfer.to_currency_code ? (
+                      <Text style={styles.meta}>
+                        Rate: 1 {item.transfer.from_currency_code} = {item.transfer.exchange_rate} {item.transfer.to_currency_code}
+                      </Text>
+                    ) : null}
+                    {item.transfer.fee_amount_minor > 0 ? (
+                      <Text style={styles.meta}>
+                        Fee: {formatMoney(item.transfer.fee_amount_minor, item.transfer.from_currency_code, item.transfer.from_decimal_places)} {item.transfer.from_currency_code}
+                      </Text>
+                    ) : null}
                   </View>
                   <Text style={styles.entryAmount}>
                     {formatMoney(
                       item.transfer.direction === "outgoing"
                         ? -item.transfer.amount_minor
-                        : item.transfer.amount_minor,
-                      currency,
-                      account.decimal_places,
+                        : item.transfer.received_amount_minor,
+                      item.transfer.direction === "outgoing"
+                        ? item.transfer.from_currency_code
+                        : item.transfer.to_currency_code,
+                      item.transfer.direction === "outgoing"
+                        ? item.transfer.from_decimal_places
+                        : item.transfer.to_decimal_places,
                     )}
                   </Text>
                 </View>

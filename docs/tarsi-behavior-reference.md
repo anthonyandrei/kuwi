@@ -400,6 +400,29 @@ confirm iPhone behavior, transfer corrections, cross-currency replacement, or
 how future-dated income changes from planned to posted. Those remain explicit
 acceptance blockers.
 
+## Cross-currency transfers
+
+The recovered web transfer screen accepts a manual rate with direction `1
+source currency = rate destination currency`; it does not call a rate provider.
+The form can derive the received amount from a rate or derive the rate from a
+received amount. Source amount and fee use source-currency minor units, and the
+received amount uses destination-currency minor units. Rates parse to positive
+finite JavaScript numbers without a configured fractional-digit limit.
+
+The form truncates excess received-currency precision before submission. For
+example, USD 100 at 149.8765 JPY per USD becomes JPY 14,987 after truncating
+14,987.65 to JPY's zero decimal places. PHP 1,000 at 0.0184567 USD per PHP
+becomes USD 18.45. If the user enters USD 18.46 instead, the implied rate is
+0.01846. The store then rounds to the currency's minor unit; UI truncation
+happens first.
+
+A Debit or Credit account can send; only Debit can receive. The accounts must
+differ, and the source must have enough available funds for principal plus any
+source-currency fee. The destination has no funds check. Transfer balance
+effects apply immediately, including for future dates. The fee is a linked
+source-account expense. Kuwi's issue #9 implementation accepts this web
+behavior; iPhone keyboard, formatting, and motion acceptance remains pending.
+
 ## Next evidence needed
 
 - Extend the observed iPhone first-run path with validation and currency edge cases.

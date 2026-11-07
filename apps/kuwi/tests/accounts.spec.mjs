@@ -1,4 +1,5 @@
 import { chromium, expect, test as base, webkit } from "@playwright/test";
+import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { startServer } from "../scripts/serve.mjs";
 
@@ -47,11 +48,11 @@ const test = base.extend({
         return legacyV1Worker;
       if (path !== "/db-worker.js" || !storageFault.current) return bytes;
       const source = bytes.toString();
-      if (["upgradeV4", "upgradeV4Transfer", "upgradeV5", "upgradeV5MigrationFailure"].includes(storageFault.current)) {
+      if (["upgradeV4", "upgradeV4Transfer", "upgradeV5", "upgradeV5MigrationFailure", "upgradeV6MigrationFailure"].includes(storageFault.current)) {
         const upgrade = storageFault.current;
         const populated = upgrade === "upgradeV4"
           ? populatedV4
-          : upgrade === "upgradeV4Transfer" ? populatedV4Transfer : populatedV5;
+          : upgrade === "upgradeV4Transfer" || upgrade === "upgradeV6MigrationFailure" ? populatedV4Transfer : populatedV5;
         storageFault.current = null;
         let transformed = source.replace(
           'const version = db.selectValue("PRAGMA user_version");',
@@ -64,7 +65,19 @@ const test = base.extend({
             '    db.exec("CREATE INDEX IF NOT EXISTS transfers_by_from_date ON transfers(from_account_id,date DESC,created_at DESC)");',
             '    db.exec("CREATE INDEX IF NOT EXISTS transfers_by_from_date ON transfers(from_account_id,date DESC,created_at DESC)");\n    if (!self.__transferMigrationFailed) { self.__transferMigrationFailed = true; throw Error("Simulated transfer migration failure"); }',
           );
+        if (upgrade === "upgradeV6MigrationFailure")
+          transformed = transformed.replace(
+            '    db.exec("PRAGMA user_version=7");',
+            '    throw Error("Simulated currency migration failure");\n    db.exec("PRAGMA user_version=7");',
+          );
         return transformed;
+      }
+      if (storageFault.current === "transferAtomicity") {
+        storageFault.current = null;
+        return source.replace(
+          "    if (feeMinor > 0) {",
+          '    if (feeMinor > 0) { if (!self.__transferWriteFailed) { self.__transferWriteFailed = true; throw Error("Simulated transfer write failure"); }',
+        );
       }
       if (storageFault.current === "transactionUpdateRollback") {
         storageFault.current = null;
@@ -316,7 +329,7 @@ test("a legacy expense and backup survive the shell update", async ({
     const currentDownload = await currentDownloadPromise;
     const currentBackup = JSON.parse(readFileSync(await currentDownload.path(), "utf8"));
     expect(currentBackup).toMatchObject({
-      schemaVersion: 6,
+      schemaVersion: 7,
       data: {
         expenses: expect.arrayContaining([expect.objectContaining({ transfer_id: expect.any(String) })]),
         transfers: [expect.objectContaining({ fee_amount_minor: 456, note: "Updated schema transfer" })],
@@ -550,7 +563,7 @@ test("expense and income edits move effects between accounts and deletions prese
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(6);
+  expect(backup.schemaVersion).toBe(7);
   expect(backup.data.expenses).toHaveLength(1);
   expect(backup.data.expenses[0].note).toBe("Rent");
   expect(backup.data.pendingSyncOperations).toEqual([
@@ -707,7 +720,7 @@ test("a populated v4 database migrates while keeping account and transaction ide
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(6);
+  expect(backup.schemaVersion).toBe(7);
   expect(backup.data.accounts.map(({ id }) => id)).toEqual(["legacy-cash", "legacy-reserve"]);
   expect(backup.data.expenses.map(({ id }) => id)).toEqual(["legacy-expense"]);
   expect(backup.data.incomes.map(({ id }) => id)).toEqual(["legacy-income"]);
@@ -739,7 +752,7 @@ test("a populated v5 database gains transfer relations without losing transactio
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup).toMatchObject({
-    schemaVersion: 6,
+    schemaVersion: 7,
     data: {
       expenses: expect.arrayContaining([
         expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
@@ -799,7 +812,7 @@ test("a populated v4 transfer database keeps its transfer and linked fee through
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup).toMatchObject({
-    schemaVersion: 6,
+    schemaVersion: 7,
     data: {
       expenses: expect.arrayContaining([
         expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
@@ -813,6 +826,134 @@ test("a populated v4 transfer database keeps its transfer and linked fee through
       pendingTransactionOperations: [],
     },
   });
+});
+
+test("cross-currency transfers preserve both minor-unit amounts through history, backup, and restore", async ({
+  page,
+}) => {
+  await finishSetup(page);
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByLabel("Account name").fill("Dollar source");
+  await page.getByRole("button", { name: "USD US Dollar" }).click();
+  await page.getByLabel("Opening balance (USD)").fill("200");
+  await page.getByRole("button", { name: "Save account" }).click();
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByLabel("Account name").fill("Yen wallet");
+  await page.getByRole("button", { name: "JPY Japanese Yen" }).click();
+  await page.getByLabel("Opening balance (JPY)").fill("0");
+  await page.getByRole("button", { name: "Save account" }).click();
+
+  await page.getByRole("button", { name: "View account Dollar source" }).click();
+  await page.getByRole("button", { name: "Transfer between accounts" }).click();
+  await page.getByLabel("To account").selectOption({ label: "Yen wallet" });
+  await page.getByLabel("Transfer amount").fill("100");
+  await page.getByLabel("Exchange rate").fill("149.8765");
+  await page.getByLabel("Transfer fee (optional)").fill("1.23");
+  await expect(page.getByLabel("Amount received (JPY)")).toHaveValue("14987");
+  await expect(page.getByLabel("Transfer summary")).toContainText("101.23");
+  await page.getByLabel("Transfer note").fill("Travel exchange");
+  await page.getByRole("button", { name: "Save transfer" }).click();
+  await expect(page.getByText(/(?:US)?\$98\.77/)).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history" }).click();
+  await expect(page.getByText(/Sent (?:US)?\$100\.00 USD · received ¥14,987 JPY/)).toBeVisible();
+  await expect(page.getByText("Rate: 1 USD = 149.8765 JPY", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Fee: (?:US)?\$1\.23 USD/)).toBeVisible();
+  await page.getByRole("button", { name: "Back to account" }).click();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
+  await page.getByRole("button", { name: "View account Yen wallet" }).click();
+  await expect(page.getByText("¥14,987", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history" }).click();
+  await expect(page.getByText(/Sent (?:US)?\$100\.00 USD · received ¥14,987 JPY/)).toBeVisible();
+  await page.getByRole("button", { name: "Back to account" }).click();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export backup" }).click();
+  const download = await downloadPromise;
+  const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
+  expect(backup.schemaVersion).toBe(7);
+  expect(backup.data.transfers).toEqual([
+    expect.objectContaining({
+      amount_minor: 10000,
+      received_amount_minor: 14987,
+      exchange_rate: "149.8765",
+      fee_amount_minor: 123,
+    }),
+  ]);
+  const chooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Restore backup" }).click();
+  await (await chooserPromise).setFiles({
+    name: "cross-currency.kuwi.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(backup)),
+  });
+  await expect(page.getByText("¥14,987", { exact: true })).toBeVisible();
+});
+
+test("a failed cross-currency write rolls back every effect and retries once", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.current = "transferAtomicity";
+  await finishSetup(page, { openingBalance: "1000" });
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByLabel("Account name").fill("Dollar wallet");
+  await page.getByRole("button", { name: "USD US Dollar" }).click();
+  await page.getByRole("button", { name: "Save account" }).click();
+  await page.getByRole("button", { name: "View account Cash" }).click();
+  await page.getByRole("button", { name: "Transfer between accounts" }).click();
+  await page.getByLabel("To account").selectOption({ label: "Dollar wallet" });
+  await page.getByLabel("Transfer amount").fill("500");
+  await page.getByLabel("Exchange rate").fill("0.018");
+  await page.getByLabel("Transfer fee (optional)").fill("20");
+  await page.getByRole("button", { name: "Save transfer" }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated transfer write failure");
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Save transfer" }).click();
+  await expect(page.getByText("₱480.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
+  await page.getByRole("button", { name: "View account Dollar wallet" }).click();
+  await expect(page.getByText(/(?:US)?\$9\.00/)).toBeVisible();
+});
+
+test("a failed v7 currency migration preserves a populated v6 transfer store", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.current = "upgradeV6MigrationFailure";
+  storageFault.disableCache = true;
+  await page.goto("/");
+  await expect(page.getByRole("alert")).toContainText("Simulated currency migration failure");
+  await page.reload();
+  await expect(page.getByText("₱908.44", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Cash" }).click();
+  await page.getByRole("button", { name: "Transaction history" }).click();
+  await expect(page.getByText("Legacy transfer", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Sent ₱100\.00 PHP · received ₱100\.00 PHP/)).toBeVisible();
+});
+
+test("manual transfer entry saves and reopens while offline", async ({ page, context }) => {
+  await finishSetup(page, { openingBalance: "1000" });
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByLabel("Account name").fill("Dollar wallet");
+  await page.getByRole("button", { name: "USD US Dollar" }).click();
+  await page.getByLabel("Opening balance (USD)").fill("0");
+  await page.getByRole("button", { name: "Save account" }).click();
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await context.setOffline(true);
+  await page.getByRole("button", { name: "View account Cash" }).click();
+  await page.getByRole("button", { name: "Transfer between accounts" }).click();
+  await page.getByLabel("To account").selectOption({ label: "Dollar wallet" });
+  await page.getByLabel("Transfer amount").fill("100");
+  await page.getByLabel("Amount received (USD)").fill("1.809");
+  await expect(page.getByLabel("Amount received (USD)")).toHaveValue("1.80");
+  await expect(page.getByLabel("Exchange rate")).toHaveValue("0.018");
+  await page.getByRole("button", { name: "Save transfer" }).click();
+  await expect(page.getByText("₱900.00", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText("₱900.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Dollar wallet" }).click();
+  await expect(page.getByText(/(?:US)?\$1\.80/)).toBeVisible();
 });
 
 test("migrates a populated v1 database into derived account balances", async ({

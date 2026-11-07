@@ -251,9 +251,25 @@ function migrateTransfers() {
   });
 }
 
+/** Add currency-aware transfer columns and backfill prior records in one transaction.
+ * Existing transfers keep their source amount as the received amount and use rate `1`.
+ * A failed schema or data update rolls back without changing the prior store.
+ */
+function migrateTransferCurrencies() {
+  transaction(() => {
+    const columns = rows("PRAGMA table_info(transfers)").map(({ name }) => name);
+    if (!columns.includes("received_amount_minor"))
+      db.exec("ALTER TABLE transfers ADD COLUMN received_amount_minor INTEGER NOT NULL DEFAULT 1 CHECK(received_amount_minor>0)");
+    if (!columns.includes("exchange_rate"))
+      db.exec("ALTER TABLE transfers ADD COLUMN exchange_rate TEXT NOT NULL DEFAULT '1' CHECK(length(exchange_rate)>0)");
+    db.exec("UPDATE transfers SET received_amount_minor=amount_minor, exchange_rate='1'");
+    db.exec("PRAGMA user_version=7");
+  });
+}
+
 /**
  * Own the OPFS database lock for the connection lifetime and initialize SQLite.
- * Fresh stores are upgraded through v6; stored v1 through v5 databases run each
+ * Fresh stores are upgraded through v7; stored v1 through v6 databases run each
  * required migration before a command can read or write data. A failed step
  * leaves that step's starting schema and records available for a later retry.
  * @throws {Error} OPFS or Web Locks is unavailable, another tab owns the database,
@@ -288,26 +304,34 @@ async function open() {
             migrateIncomes();
             migrateTransactionOperations();
             migrateTransfers();
+            migrateTransferCurrencies();
           } else if (version === 1) {
             migrateV1();
             migrateExpenses();
             migrateIncomes();
             migrateTransactionOperations();
             migrateTransfers();
+            migrateTransferCurrencies();
           } else if (version === 2) {
             migrateExpenses();
             migrateIncomes();
             migrateTransactionOperations();
             migrateTransfers();
+            migrateTransferCurrencies();
           } else if (version === 3) {
             migrateIncomes();
             migrateTransactionOperations();
             migrateTransfers();
+            migrateTransferCurrencies();
           } else if (version === 4) {
             migrateTransactionOperations();
             migrateTransfers();
-          } else if (version === 5) migrateTransfers();
-          else if (version !== 6)
+            migrateTransferCurrencies();
+          } else if (version === 5) {
+            migrateTransfers();
+            migrateTransferCurrencies();
+          } else if (version === 6) migrateTransferCurrencies();
+          else if (version !== 7)
             throw Error("Unsupported database version. Existing data has been preserved.");
           const lifetime = new Promise((done) => { release = done; });
           resolve();
@@ -326,8 +350,8 @@ async function open() {
 
 /**
  * Read one account with its balance derived from adjustments, expenses, income, and transfers.
- * Posted income offsets expenses; transfer principal moves between accounts immediately.
- * Linked fees affect balances even when a transfer has a future date.
+ * Posted income offsets expenses; source principal leaves and received minor units enter immediately.
+ * Linked fees affect balances in source currency even when a transfer has a future date.
  * @param {string} accountId - Account primary key.
  * @returns {object|null} Account details with currency precision and balance, or null when missing.
  */
@@ -341,7 +365,7 @@ function account(accountId) {
              + (SELECT COALESCE(SUM(t.amount_minor),0) FROM transfers t WHERE t.from_account_id=a.id)
           ELSE -(SELECT COALESCE(SUM(e.amount_minor),0) FROM expenses e WHERE e.account_id=a.id AND (e.date<=? OR e.transfer_id IS NOT NULL))
              + (SELECT COALESCE(SUM(i.amount_minor),0) FROM incomes i WHERE i.account_id=a.id AND i.date<=? AND i.planned=0)
-             + (SELECT COALESCE(SUM(t.amount_minor),0) FROM transfers t WHERE t.to_account_id=a.id)
+             + (SELECT COALESCE(SUM(t.received_amount_minor),0) FROM transfers t WHERE t.to_account_id=a.id)
              -(SELECT COALESCE(SUM(t.amount_minor),0) FROM transfers t WHERE t.from_account_id=a.id)
         END AS balance_minor,
       (EXISTS(SELECT 1 FROM account_adjustments linked WHERE linked.account_id=a.id)
@@ -355,6 +379,7 @@ function account(accountId) {
 
 /**
  * List accounts in creation order with balances derived from adjustments, transactions, and transfers.
+ * Incoming transfers use received minor units; outgoing transfers use source principal units.
  * @returns {Array<object>} Saved account details, currency precision, and derived balances.
  */
 function accountList() {
@@ -367,7 +392,7 @@ function accountList() {
              + (SELECT COALESCE(SUM(t.amount_minor),0) FROM transfers t WHERE t.from_account_id=a.id)
           ELSE -(SELECT COALESCE(SUM(e.amount_minor),0) FROM expenses e WHERE e.account_id=a.id AND (e.date<=? OR e.transfer_id IS NOT NULL))
              + (SELECT COALESCE(SUM(i.amount_minor),0) FROM incomes i WHERE i.account_id=a.id AND i.date<=? AND i.planned=0)
-             + (SELECT COALESCE(SUM(t.amount_minor),0) FROM transfers t WHERE t.to_account_id=a.id)
+             + (SELECT COALESCE(SUM(t.received_amount_minor),0) FROM transfers t WHERE t.to_account_id=a.id)
              -(SELECT COALESCE(SUM(t.amount_minor),0) FROM transfers t WHERE t.from_account_id=a.id)
         END AS balance_minor,
       (EXISTS(SELECT 1 FROM account_adjustments linked WHERE linked.account_id=a.id)
@@ -410,7 +435,7 @@ function state() {
 
 const backupFormat = "kuwi.backup";
 const backupVersion = 1;
-const backupSchemaVersion = 6;
+const backupSchemaVersion = 7;
 const legacyBackupSchemaVersion = 3;
 const previousBackupSchemaVersion = 4;
 const transactionBackupSchemaVersion = 5;
@@ -465,7 +490,7 @@ async function backupDigest(body) {
 }
 
 /** Snapshot every current source relation in deterministic order and attach its integrity digest.
- * @returns {Promise<object>} A complete v1/v6 Kuwi backup envelope.
+ * @returns {Promise<object>} A complete v1/v7 Kuwi backup envelope.
  * @throws {Error} SQLite reads or Web Crypto digest generation fail.
  */
 async function createBackup() {
@@ -479,6 +504,7 @@ async function createBackup() {
     categories: rows("SELECT id, label, sort_order FROM categories ORDER BY sort_order, id"),
     expenses: rows("SELECT id, account_id, category_id, amount_minor, date, note, created_at, transfer_id FROM expenses ORDER BY id"),
     transfers: rows(`SELECT t.id, t.from_account_id, t.to_account_id, t.amount_minor,
+        t.received_amount_minor, t.exchange_rate,
         COALESCE((SELECT e.amount_minor FROM expenses e WHERE e.transfer_id=t.id),0) AS fee_amount_minor,
         t.date, t.note, t.created_at
       FROM transfers t ORDER BY t.id`),
@@ -568,7 +594,8 @@ function requireTimestamp(value, description) {
   requireText(value, description);
 }
 
-/** Validate the v1 envelope, supported definitions, row constraints, and references without changing live tables.
+/** Validate supported backup envelopes, row constraints, and references without changing live tables.
+ * Accepts schema versions 3 through 7 and backfills legacy same-currency transfer fields in memory.
  * Expense dates must be valid calendar dates no later than the browser's local date.
  * @param {unknown} backup - Parsed candidate file contents.
  * @returns {Promise<object>} The candidate's validated current relation rows.
@@ -578,7 +605,7 @@ async function validateBackup(backup) {
   if (!backup || typeof backup !== "object" || Array.isArray(backup) || backup.format !== backupFormat)
     throw Error("This file is not a Kuwi backup.");
   if (backup.version !== backupVersion ||
-    ![legacyBackupSchemaVersion, previousBackupSchemaVersion, transactionBackupSchemaVersion, backupSchemaVersion].includes(backup.schemaVersion))
+    ![legacyBackupSchemaVersion, previousBackupSchemaVersion, transactionBackupSchemaVersion, 6, backupSchemaVersion].includes(backup.schemaVersion))
     throw Error("This Kuwi backup uses an unsupported version.");
   const expectedEnvelopeKeys = ["data", "exportedAt", "format", "integrity", "schemaVersion", "version"];
   if (Object.keys(backup).sort().join("\0") !== expectedEnvelopeKeys.sort().join("\0"))
@@ -641,7 +668,9 @@ async function validateBackup(backup) {
     : ["id", "account_id", "category_id", "amount_minor", "date", "note", "created_at"]);
   const pendingSync = requireRows(data, "pendingSyncOperations", ["operation_id"]);
   const transfers = hasTransferRelations
-    ? requireRows(data, "transfers", ["id", "from_account_id", "to_account_id", "amount_minor", "fee_amount_minor", "date", "note", "created_at"])
+    ? requireRows(data, "transfers", backup.schemaVersion >= 7
+      ? ["id", "from_account_id", "to_account_id", "amount_minor", "received_amount_minor", "exchange_rate", "fee_amount_minor", "date", "note", "created_at"]
+      : ["id", "from_account_id", "to_account_id", "amount_minor", "fee_amount_minor", "date", "note", "created_at"])
     : [];
   const pendingTransfers = hasTransferRelations
     ? requireRows(data, "pendingTransferOperations", ["operation_id", "request_fingerprint"])
@@ -748,9 +777,22 @@ async function validateBackup(backup) {
     const destination = accountsById.get(transfer.to_account_id);
     if (!source || !destination || transfer.from_account_id === transfer.to_account_id)
       throw Error("Backup reference check failed: a transfer refers to missing or identical accounts.");
-    if (!["debit", "credit"].includes(source.type) || destination.type !== "debit" || source.currency_code !== destination.currency_code)
-      throw Error("Backup data constraints failed: transfer accounts are not eligible for a same-currency transfer.");
+    if (!["debit", "credit"].includes(source.type) || destination.type !== "debit")
+      throw Error("Backup data constraints failed: transfer accounts are not eligible.");
+    if (backup.schemaVersion < 7 && source.currency_code !== destination.currency_code)
+      throw Error("Backup data constraints failed: a legacy transfer must use the same currency.");
     requireInteger(transfer.amount_minor, "transfers.amount_minor", { minimum: 1 });
+    if (backup.schemaVersion < 7) {
+      transfer.received_amount_minor = transfer.amount_minor;
+      transfer.exchange_rate = "1";
+    }
+    requireInteger(transfer.received_amount_minor, "transfers.received_amount_minor", { minimum: 1 });
+    const exchangeRate = Number(transfer.exchange_rate);
+    if (typeof transfer.exchange_rate !== "string" || !Number.isFinite(exchangeRate) || exchangeRate <= 0 || exchangeRate.toString() !== transfer.exchange_rate)
+      throw Error("Backup data constraints failed: a transfer exchange rate is invalid.");
+    if (source.currency_code === destination.currency_code &&
+      (transfer.received_amount_minor !== transfer.amount_minor || transfer.exchange_rate !== "1"))
+      throw Error("Backup data constraints failed: same-currency transfer amounts must match at rate one.");
     requireInteger(transfer.fee_amount_minor, "transfers.fee_amount_minor", { minimum: 0 });
     if (!isValidDate(transfer.date)) throw Error("Backup data constraints failed: a transfer date is invalid.");
     if (transfer.note !== null && typeof transfer.note !== "string")
@@ -867,7 +909,7 @@ function replaceBackupData(data) {
     insertRows("account_adjustments", ["id", "account_id", "amount_minor", "adjustment_type", "created_at"], data.accountAdjustments);
     insertRows("setup", ["id", "profile_id", "first_account_id", "completed_at"], data.setup);
     insertRows("pending_operations", ["id", "account_id", "operation_type", "request_fingerprint", "created_at"], data.pendingOperations);
-    insertRows("transfers", ["id", "from_account_id", "to_account_id", "amount_minor", "date", "note", "created_at"], data.transfers);
+    insertRows("transfers", ["id", "from_account_id", "to_account_id", "amount_minor", "date", "note", "created_at", "received_amount_minor", "exchange_rate"], data.transfers);
     insertRows("expenses", ["id", "account_id", "category_id", "amount_minor", "date", "note", "created_at", "transfer_id"], data.expenses);
     insertRows("pending_sync_operations", ["operation_id"], data.pendingSyncOperations);
     insertRows("incomes", ["id", "account_id", "category_id", "amount_minor", "date", "note", "planned", "created_at"], data.incomes);
@@ -889,7 +931,8 @@ async function restoreBackup(backup) {
 }
 
 /**
- * Return one account, all account balances, canonical categories, and its transaction history.
+ * Return one account, all balances, canonical categories, and its transaction history.
+ * Transfer rows include source and destination currencies, minor units, and the linked source fee.
  * @param {string} [accountId] - Account ID; omitted to use the setup account.
  * @returns {object|null} The selected account, full account list, category lists, and
  *   that account's transactions; null when the requested account is unavailable.
@@ -922,13 +965,19 @@ function readLedger(accountId) {
     ),
     transfers: rows(
       `SELECT t.id, t.id AS operation_id, t.from_account_id, source.name AS from_account_name,
-        t.to_account_id, destination.name AS to_account_name, t.amount_minor, t.date, t.note,
+        t.to_account_id, destination.name AS to_account_name, t.amount_minor,
+        t.received_amount_minor, t.exchange_rate,
+        source.currency_code AS from_currency_code, sourceCurrency.decimal_places AS from_decimal_places,
+        destination.currency_code AS to_currency_code, destinationCurrency.decimal_places AS to_decimal_places,
+        t.date, t.note,
         t.created_at, fee.id AS fee_expense_id, COALESCE(fee.amount_minor,0) AS fee_amount_minor,
         CASE WHEN t.from_account_id=? THEN 'outgoing' ELSE 'incoming' END AS direction
        FROM transfers t
        JOIN pending_transfer_operations p ON p.operation_id=t.id
        JOIN accounts source ON source.id=t.from_account_id
        JOIN accounts destination ON destination.id=t.to_account_id
+       JOIN currencies sourceCurrency ON sourceCurrency.code=source.currency_code
+       JOIN currencies destinationCurrency ON destinationCurrency.code=destination.currency_code
        LEFT JOIN expenses fee ON fee.transfer_id=t.id
        WHERE t.from_account_id=? OR t.to_account_id=?
        ORDER BY t.date DESC, t.created_at DESC, t.id DESC`,
@@ -1099,11 +1148,13 @@ function createIncome(args) {
 }
 
 /**
- * Commit a same-currency transfer, optional linked fee expense, and pending operation atomically.
- * Debit sources lose principal and fee; credit sources owe both. Debit destinations receive principal.
- * @param {object} args - Stable operation ID, eligible source and destination IDs, positive principal,
- *   nonnegative fee in minor units, valid date including future dates, and optional note.
- * @returns {Promise<object>} Refreshed accounts, source ledger, and whether the request replayed.
+ * Commit both currency effects, a source-currency fee expense, and the retry receipt atomically.
+ * Debit sources lose principal and fee; credit sources owe both. Debit destinations receive
+ * their exact destination minor units immediately, including for future-dated transfers.
+ * @param {object} args - Stable operation ID, eligible source and destination IDs, positive source
+ *   and received amounts in their account minor units, positive destination-per-source rate,
+ *   nonnegative source-currency fee, valid date including future dates, and optional note.
+ * @returns {Promise<object>} Refreshed accounts, source ledger, and whether this was a replay.
  * @throws {Error} Invalid fields or accounts, insufficient available funds, conflicting retry, or failed write.
  */
 async function createTransfer(args) {
@@ -1111,17 +1162,28 @@ async function createTransfer(args) {
   const fromAccountId = args.fromAccountId;
   const toAccountId = args.toAccountId;
   const amountMinor = args.amountMinor;
+  const receivedAmountMinor = args.receivedAmountMinor;
+  const exchangeRateValue = typeof args.exchangeRate === "string" ? Number(args.exchangeRate) : NaN;
+  const exchangeRate = Number.isFinite(exchangeRateValue) && exchangeRateValue > 0
+    ? exchangeRateValue.toString()
+    : "";
   const feeMinor = args.feeMinor ?? 0;
   const date = args.date;
   const note = typeof args.note === "string" ? args.note.trim() || null : null;
   if (!operationId || !Number.isSafeInteger(amountMinor) || amountMinor <= 0)
     throw Error("Enter a transfer amount greater than zero.");
+  if (!Number.isSafeInteger(receivedAmountMinor) || receivedAmountMinor <= 0 || !exchangeRate)
+    throw Error("Enter a valid received amount and positive exchange rate.");
   if (!Number.isSafeInteger(feeMinor) || feeMinor < 0 || !Number.isSafeInteger(amountMinor + feeMinor))
     throw Error("Enter a valid transfer fee.");
   if (!isValidDate(date)) throw Error("Choose a valid transfer date.");
   if (args.note != null && typeof args.note !== "string")
     throw Error("Enter a valid transfer note.");
-  const fingerprint = await requestFingerprint({ fromAccountId, toAccountId, amountMinor, feeMinor, date, note });
+  const fingerprint = await requestFingerprint({
+    fromAccountId, toAccountId, amountMinor, receivedAmountMinor,
+    exchangeRate, feeMinor, date, note,
+  });
+  const legacyFingerprint = await requestFingerprint({ fromAccountId, toAccountId, amountMinor, feeMinor, date, note });
   let replayed = false;
   transaction(() => {
     const prior = rows(
@@ -1129,8 +1191,18 @@ async function createTransfer(args) {
       [operationId],
     )[0];
     if (prior) {
-      if (prior.request_fingerprint !== fingerprint)
+      if (prior.request_fingerprint !== fingerprint && prior.request_fingerprint !== legacyFingerprint)
         throw Error("This retry contains different transfer details.");
+      if (prior.request_fingerprint === legacyFingerprint) {
+        const existing = rows("SELECT from_account_id,to_account_id,amount_minor,received_amount_minor,exchange_rate FROM transfers WHERE id=?", [operationId])[0];
+        const source = existing && account(existing.from_account_id);
+        const destination = existing && account(existing.to_account_id);
+        if (!existing || existing.from_account_id !== fromAccountId || existing.to_account_id !== toAccountId ||
+          existing.amount_minor !== amountMinor || existing.received_amount_minor !== amountMinor ||
+          existing.exchange_rate !== "1" || source?.currency_code !== destination?.currency_code ||
+          receivedAmountMinor !== amountMinor || exchangeRate !== "1")
+          throw Error("This retry contains different transfer details.");
+      }
       replayed = true;
       return;
     }
@@ -1141,8 +1213,9 @@ async function createTransfer(args) {
     if (!source || !destination) throw Error("Choose available transfer accounts.");
     if (!["debit", "credit"].includes(source.type) || destination.type !== "debit")
       throw Error("Transfers require a debit or credit source and a debit destination.");
-    if (source.currency_code !== destination.currency_code)
-      throw Error("Choose accounts with the same currency.");
+    if (source.currency_code === destination.currency_code &&
+      (receivedAmountMinor !== amountMinor || exchangeRate !== "1"))
+      throw Error("Same-currency transfers must use equal amounts and a rate of one.");
     const available = source.type === "credit"
       ? source.credit_limit_minor - source.balance_minor
       : source.balance_minor;
@@ -1151,8 +1224,8 @@ async function createTransfer(args) {
 
     const createdAt = new Date().toISOString();
     db.exec({
-      sql: "INSERT INTO transfers(id,from_account_id,to_account_id,amount_minor,date,note,created_at) VALUES(?,?,?,?,?,?,?)",
-      bind: [operationId, fromAccountId, toAccountId, amountMinor, date, note, createdAt],
+      sql: "INSERT INTO transfers(id,from_account_id,to_account_id,amount_minor,date,note,created_at,received_amount_minor,exchange_rate) VALUES(?,?,?,?,?,?,?,?,?)",
+      bind: [operationId, fromAccountId, toAccountId, amountMinor, date, note, createdAt, receivedAmountMinor, exchangeRate],
     });
     if (feeMinor > 0) {
       const feeId = `fee:${operationId}`;

@@ -155,7 +155,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     expect(backup).toMatchObject({
       format: "kuwi.backup",
       version: 1,
-      schemaVersion: 6,
+      schemaVersion: 7,
       integrity: { algorithm: "SHA-256" },
       data: {
         profiles: [{ preferred_name: "Anthony", preferred_currency: "PHP" }],
@@ -199,6 +199,19 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       },
     });
     expect(backup.data.pendingTransactionOperations).toHaveLength(2);
+
+    const sameCurrencyV6Backup = structuredClone(backup);
+    sameCurrencyV6Backup.schemaVersion = 6;
+    sameCurrencyV6Backup.data.transfers = sameCurrencyV6Backup.data.transfers.map(
+      ({ received_amount_minor, exchange_rate, ...transfer }) => transfer,
+    );
+    await restoreFile(page, {
+      name: "same-currency-v6.kuwi.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(sameCurrencyV6Backup))),
+    });
+    await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     await page.getByRole("button", { name: "View account Cash", exact: true }).click();
     await page.getByRole("button", { name: "Add expense", exact: true }).click();

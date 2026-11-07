@@ -50,6 +50,12 @@ export type TransferRecord = {
   to_account_id: string;
   to_account_name: string;
   amount_minor: number;
+  received_amount_minor: number;
+  exchange_rate: string;
+  from_currency_code: string;
+  from_decimal_places: number;
+  to_currency_code: string;
+  to_decimal_places: number;
   date: string;
   note: string | null;
   created_at: string;
@@ -78,6 +84,8 @@ export type CreateTransferInput = {
   fromAccountId: string;
   toAccountId: string;
   amountMinor: number;
+  receivedAmountMinor: number;
+  exchangeRate: string;
   feeMinor: number;
   date: string;
   note?: string;
@@ -159,6 +167,8 @@ export type BackupTransfer = {
   from_account_id: string;
   to_account_id: string;
   amount_minor: number;
+  received_amount_minor: number;
+  exchange_rate: string;
   fee_amount_minor: number;
   date: string;
   note: string | null;
@@ -206,7 +216,7 @@ export type ProductBackupData = {
 export type ProductBackup = {
   format: "kuwi.backup";
   version: 1;
-  schemaVersion: 6;
+  schemaVersion: 7;
   exportedAt: string;
   integrity: { algorithm: "SHA-256"; digest: string };
   data: ProductBackupData;

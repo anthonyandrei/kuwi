@@ -1,6 +1,6 @@
 # Account data model
 
-Updated: 2026-11-07
+Updated: 2026-11-08
 
 This document records the local SQLite model and the account behavior currently
 implemented in `apps/kuwi`. It is the review point for later account and finance
@@ -56,7 +56,7 @@ Credit accounts; the recovered income form does not offer Assets accounts.
 | `income_categories` | `id` | Canonical label and display order for built-in income categories. |
 | `incomes` | `id` | `account_id` → `accounts.id`, optional `category_id` → `income_categories.id`, nonnegative minor units, date, optional note, planned flag, `created_at`. |
 | `pending_income_sync_operations` | `operation_id` | `operation_id` → `incomes.id`; marks an income creation for local sync. |
-| `transfers` | `id` | `from_account_id` and `to_account_id` → `accounts.id`, positive principal in minor units, date, optional note, `created_at`. |
+| `transfers` | `id` | Account references, positive source principal and received amount in their respective minor units, canonical parsed rate, date, optional note, `created_at`. |
 | `expenses.transfer_id` | nullable foreign key | `transfer_id` → `transfers.id`; identifies the linked transfer-fee expense. The fee amount and category are stored on the expense. |
 | `pending_transfer_operations` | `operation_id` | `operation_id` → `transfers.id`, SHA-256 request fingerprint; marks the transfer for local sync and stable retries. |
 | `pending_transaction_operations` | `operation_id` | Transaction kind and ID, edit/delete type, request fingerprint, and creation time. Delete receipts retain IDs after their transaction row is removed. |
@@ -73,18 +73,21 @@ and creation time. This relation has no foreign key because delete receipts must
 outlive their transaction rows. `setup.id` identifies one profile and its first
 account.
 
-`transfer id → source account, destination account, principal, date, note, and
-creation time`. A fee is an expense in the `fees` category whose `transfer_id`
+`transfer id → source account, destination account, source principal, received
+amount, exchange rate, date, note, and creation time`. Source and destination
+currencies and precision come from their account references. A fee is an
+expense in the `fees` category whose `transfer_id`
 points to the transfer. The transfer does not store a second fee amount. The
 backup contract exposes a derived fee amount for compatibility.
 
 Balances combine `account_adjustments`, posted expense and income effects, and
-transfer principal effects; the app does not store another mutable balance on
-`accounts`. A debit source loses the transfer principal and any linked fee,
-while a debit destination receives the principal. A credit source owes the
-principal and fee. Account name and currency are stored once and referenced by
-ID from linked facts. Credit limits are account terms, while credit balances
-come from adjustment and transaction facts.
+transfer source and received amount effects; the app does not store another
+mutable balance on `accounts`. A debit source loses the transfer principal and any linked fee,
+while a debit destination receives the separate received amount. A credit
+source owes the principal and fee. Transfer fees use the source currency.
+Account name and currency are stored once and referenced by ID from linked
+facts. Credit limits are account terms, while credit balances come from
+adjustment and transaction facts.
 
 ## Write and retry contract
 
@@ -124,11 +127,11 @@ migration and preserves version 2 data if it fails.
 
 Version 4 adds income categories, incomes, and pending income sync markers.
 Version 5 adds transaction edit/delete receipts. Version 6 adds transfers,
-linked fee references on expenses, and pending transfer operations. The v6
-migration adds transfer relations to income-only databases and preserves rows
-in earlier v4 databases that already have transfers. It also upgrades v5
-databases with transaction receipts but no transfers. Migrations preserve
-account, expense, income, category, and setup IDs.
+linked fee references on expenses, and pending transfer operations. Version 7
+adds received-currency minor units and the canonical parsed exchange-rate
+string. Existing same-currency transfers migrate with equal source and received
+amounts and rate `1`. The v7 migration is transactional and preserves populated
+v6 stores when a backfill fails.
 
 The adjustment table currently accepts initial balances only. Manual balance
 adjustments, account deletion, loan schedules, investments, budgets, and
