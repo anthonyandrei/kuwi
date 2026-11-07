@@ -36,6 +36,26 @@ write/migration failures, interrupt an active transaction, or lose a save reply.
 the exported production app. The tests assert visible setup, balances,
 rollback/retry, ownership handoff, and offline reopening after browser closure.
 
+Upgrade journeys serve prior product shells and workers first, then switch the
+same origin to the current app. The setup-era v1 build checks schema migration,
+worker ownership handoff, retained balance and history, and an offline write.
+The populated v3 build carries an expense and an exported backup through the
+shell update, restores that backup, then reopens offline. A separate v1
+migration failure injects an error after the migration statements run, so the
+transaction must restore the old schema before a retry. The quota journey
+checks the visible error and confirms that the saved account remains available
+after retry.
+
+Backup export downloads the versioned JSON contract described in
+[`finance-storage.md`](../../docs/finance-storage.md#product-backup-contract).
+Restore uses the browser's file picker and validates contents regardless of the
+file extension or reported MIME type. Candidate data is checked before an
+atomic replacement; failure leaves the existing local ledger available. The
+Chromium and disk-backed WebKit journeys cover real downloads, file selection,
+rejected candidates, valid round trips, rollback after replacement begins, and
+offline reopen followed by another write. Export and restore through Files in
+the installed iPhone app still need physical-device acceptance.
+
 The database uses product-specific OPFS paths and a Web Lock acquired before
 opening files. It never opens the probe's files. Startup preserves existing
 files and displays failures without a fallback ledger. Closing the database
@@ -95,11 +115,11 @@ No Cloudflare product deployment or storage migration was needed.
 ## Validation on 2026-11-07
 
 `npm exec --yes --package=pnpm@11.25.0 -- pnpm check` passed lint, TypeScript,
-the static build, and all 70 Playwright journeys. Chromium and Playwright
-WebKit ran 35 journeys each against real OPFS storage. The suite covers income
-posting, history, currency rounding, Credit debt reduction, future planned
-entries, migration failure, atomic rollback, retry idempotency, interruption,
-and offline reopening. Physical iPhone acceptance for income remains pending.
+the static build, and all 80 Playwright journeys, 40 each in Chromium and
+WebKit, against real OPFS storage. Coverage includes income posting and retries,
+backup downloads and file selection, integrity and reference checks, rollback,
+migration recovery, offline reopening, and another write. Physical iPhone Files
+and income acceptance remain pending.
 
 Physical iPhone installation, offline reopening, and populated Safari ownership
 handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2
@@ -115,8 +135,9 @@ Kuwi uses the observed sequence and defaults with its own cream/sage layout and
 quokka artwork. This verifies usable setup transitions, not identical Tarsi
 animation timing or artwork. Blank-name validation and non-PHP precision still
 come from the separate shipped-web evidence, not new native observations.
-Backup/restore, income acceptance on a physical iPhone, and later finance
-journeys remain outstanding.
+Physical iPhone Files export and restore, income entry, and later finance
+journeys remain outstanding. Browser journeys do not establish installed-app
+picker or download behavior.
 
 ## Vercel verification on 2026-11-07
 

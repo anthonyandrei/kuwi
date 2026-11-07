@@ -15,6 +15,7 @@ import {
   database,
   type Account,
   type TransactionLedger,
+  type ProductBackup,
   type Setup,
 } from "../storage/client";
 import { TransactionWorkspace } from "../transactions/TransactionWorkspace";
@@ -72,7 +73,7 @@ function formatMoney(amount: number, currency: string) {
 
 type AccountForm = { mode: "create" } | { mode: "edit"; account: Account };
 
-/** Render local setup, saved accounts, and transaction workspaces with visible storage errors. */
+/** Render local setup, account management, transaction workspaces, and backup actions. */
 export default function Home() {
   const [saved, setSaved] = useState<Setup | null>(null),
     [phase, setPhase] = useState("loading");
@@ -97,6 +98,7 @@ export default function Home() {
   const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
   const [transactionLedger, setTransactionLedger] = useState<TransactionLedger | null>(null);
   const [transactionMode, setTransactionMode] = useState<"expense" | "income" | "history" | null>(null);
+  const [backupMessage, setBackupMessage] = useState("");
   /**
    * Reopen the worker and read canonical setup, updating saved data and phase.
    * Resolves after startup succeeds or its failure is displayed; callers reset
@@ -278,6 +280,72 @@ export default function Home() {
       setError((e as Error).message);
     }
   }
+  /** Download the complete v4 snapshot; report export errors in the visible page alert.
+   * @returns {Promise<void>} Resolves after the browser download is triggered.
+   */
+  async function exportBackup() {
+    setSaving(true);
+    setError("");
+    setBackupMessage("");
+    try {
+      const backup = await database<ProductBackup>("exportBackup");
+      const file = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `kuwi-backup-${new Date().toISOString().slice(0, 10)}.kuwi.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setBackupMessage("Backup downloaded.");
+    } catch (failure) {
+      setError(`Backup export failed: ${(failure as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+  /** Parse and restore one selected file, updating visible state only after commit.
+   * @param {File} file - User-selected backup contents; extension and MIME type are ignored.
+   * @returns {Promise<void>} Resolves after success or after a failure is shown to the user.
+   */
+  async function restoreBackupFile(file: File) {
+    setSaving(true);
+    setError("");
+    setBackupMessage("");
+    try {
+      let backup: unknown;
+      try {
+        backup = JSON.parse(await file.text());
+      } catch {
+        throw Error("This file is not valid JSON. Choose a Kuwi backup file.");
+      }
+      const restored = await database<Setup | null>("restoreBackup", { backup });
+      setSaved(restored);
+      setSelectedAccount(null);
+      setTransactionLedger(null);
+      setTransactionMode(null);
+      setAccountForm(null);
+      setBackupMessage("Backup restored.");
+    } catch (failure) {
+      setError(`Backup restore failed: ${(failure as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+  /** Open the system file picker; `accept` is only a hint and content is validated after selection.
+   * @returns {void} Starts a restore after the user selects a file; cancellation leaves data unchanged.
+   */
+  function chooseBackupFile() {
+    const picker = document.createElement("input");
+    picker.type = "file";
+    picker.accept = ".json,.kuwi-backup,application/json";
+    picker.onchange = () => {
+      const file = picker.files?.[0];
+      if (file) void restoreBackupFile(file);
+    };
+    picker.click();
+  }
   /** Render a labeled action with a real disabled state during validation or saving. */
   const button = (label: string, onPress: () => void, disabled = false) => (
     <Pressable
@@ -299,6 +367,11 @@ export default function Home() {
         {error ? (
           <Text accessibilityRole="alert" style={s.error}>
             {error}
+          </Text>
+        ) : null}
+        {backupMessage ? (
+          <Text accessibilityRole="status" style={s.note}>
+            {backupMessage}
           </Text>
         ) : null}
         <Modal
@@ -568,6 +641,9 @@ export default function Home() {
                 ))}
                 {button("Add account", () => editAccount())}
                 <Text style={s.note}>Saved on this device. No sign-in required.</Text>
+                <Text style={s.note}>Restoring a backup replaces the data saved in this browser.</Text>
+                {button(saving ? "Exporting…" : "Export backup", () => void exportBackup(), saving)}
+                {button(saving ? "Working…" : "Restore backup", chooseBackupFile, saving)}
                 {button("Close database", () => void close())}
               </View>
             )}

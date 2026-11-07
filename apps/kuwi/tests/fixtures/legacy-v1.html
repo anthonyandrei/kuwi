@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kuwi legacy build fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Kuwi legacy build</h1>
+      <form>
+        <label>Preferred name <input name="preferredName" value="Anthony" /></label>
+        <label>Account name <input name="accountName" value="Cash" /></label>
+        <label>Opening balance (PHP) <input name="openingBalance" value="1234.56" /></label>
+        <button>Save my account</button>
+      </form>
+      <p role="status" aria-live="polite">Opening local storage…</p>
+      <button type="button" hidden>Close database</button>
+    </main>
+    <script type="module">
+      const worker = new Worker("/db-worker.js", { type: "module" });
+      let sequence = 0;
+      const requests = new Map();
+      const status = document.querySelector('[role="status"]');
+      const close = document.querySelector('button[type="button"]');
+      worker.onmessage = ({ data }) => {
+        const request = requests.get(data.id);
+        if (!request) return;
+        requests.delete(data.id);
+        if (data.error) request.reject(Error(data.error));
+        else request.resolve(data.result);
+      };
+      /**
+       * Send one legacy worker command.
+       * @param {string} command - Command supported by the setup-era worker.
+       * @param {object} [args={}] - Command-specific values.
+       * @returns {Promise<*>} Command result; rejects on a worker error.
+       */
+      function send(command, args = {}) {
+        return new Promise((resolve, reject) => {
+          const id = ++sequence;
+          requests.set(id, { resolve, reject });
+          worker.postMessage({ id, command, args });
+        });
+      }
+      /**
+       * Display saved setup and hide its first-run form.
+       * @param {object|null} saved - Setup returned by the worker, or null before setup.
+       */
+      function render(saved) {
+        if (!saved) return;
+        status.textContent = `Welcome, ${saved.preferred_name}. ${saved.account_name}: ₱${(saved.opening_balance_minor / 100).toFixed(2)}`;
+        document.querySelector("form").hidden = true;
+        close.hidden = false;
+      }
+      document.querySelector("form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const values = new FormData(event.currentTarget);
+        const amount = Number(values.get("openingBalance"));
+        try {
+          render(await send("complete", {
+            name: values.get("preferredName"),
+            account: values.get("accountName"),
+            currency: "PHP",
+            amountMinor: Math.round(amount * 100),
+          }));
+        } catch (error) {
+          status.textContent = error.message;
+        }
+      });
+      close.addEventListener("click", async () => {
+        await send("close");
+        status.textContent = "Database closed";
+      });
+      send("state").then(render, (error) => { status.textContent = error.message; });
+    </script>
+  </body>
+</html>
