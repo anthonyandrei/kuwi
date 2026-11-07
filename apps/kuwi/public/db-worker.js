@@ -154,13 +154,11 @@ function migrateExpenses() {
 }
 
 /**
- * Migrate v3 to v4 in one transaction, adding incomes and same-currency transfers.
- * The income and transfer relations share this unpublished v4 schema so neither
- * feature requires a competing migration or backup format.
+ * Migrate v3 to v4 in one transaction, adding income records.
  * @returns {void} The database is left at v4 after commit.
  * @throws {Error} SQLite failures roll back the migration and retain v3 data.
  */
-function migrateTransactions() {
+function migrateIncomes() {
   transaction(() => {
     db.exec(`
       CREATE TABLE income_categories(
@@ -191,32 +189,71 @@ function migrateTransactions() {
       CREATE TABLE pending_income_sync_operations(
         operation_id TEXT PRIMARY KEY NOT NULL REFERENCES incomes(id)
       ) STRICT;
-      CREATE TABLE transfers(
-        id TEXT PRIMARY KEY NOT NULL,
-        from_account_id TEXT NOT NULL REFERENCES accounts(id),
-        to_account_id TEXT NOT NULL REFERENCES accounts(id),
-        amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
-        date TEXT NOT NULL CHECK(length(date)=10),
-        note TEXT,
-        created_at TEXT NOT NULL,
-        CHECK(from_account_id != to_account_id)
-      ) STRICT;
-      CREATE INDEX transfers_by_from_date ON transfers(from_account_id,date DESC,created_at DESC);
-      CREATE INDEX transfers_by_to_date ON transfers(to_account_id,date DESC,created_at DESC);
-      ALTER TABLE expenses ADD COLUMN transfer_id TEXT REFERENCES transfers(id);
-      CREATE UNIQUE INDEX expenses_one_fee_per_transfer ON expenses(transfer_id) WHERE transfer_id IS NOT NULL;
-      CREATE TABLE pending_transfer_operations(
-        operation_id TEXT PRIMARY KEY NOT NULL REFERENCES transfers(id),
-        request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint)=64)
-      ) STRICT;
       PRAGMA user_version=4;
     `);
   });
 }
 
+/** Add durable transaction edit and delete receipts in one transaction.
+ * @returns {void} Leaves the database at schema version 5 after commit.
+ * @throws {Error} SQLite rejects the receipt table or version update; the migration rolls back.
+ */
+function migrateTransactionOperations() {
+  transaction(() => {
+    const hasTransactionOperations = rows("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_transaction_operations'").length > 0;
+    if (!hasTransactionOperations) db.exec(`CREATE TABLE pending_transaction_operations(
+        operation_id TEXT PRIMARY KEY NOT NULL,
+        transaction_kind TEXT NOT NULL CHECK(transaction_kind IN ('expense','income')),
+        transaction_id TEXT NOT NULL,
+        operation_type TEXT NOT NULL CHECK(operation_type IN ('edit','delete')),
+        request_fingerprint TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      ) STRICT`);
+    db.exec("PRAGMA user_version=5");
+  });
+}
+
+/** Add transfer relations after the v5 receipt migration, preserving earlier v4 transfer data.
+ * @returns {void} Leaves the database at schema version 6 after commit.
+ * @throws {Error} SQLite rejects a relation change or the version update; the migration rolls back.
+ */
+function migrateTransfers() {
+  transaction(() => {
+    const hasTransfers = rows("SELECT name FROM sqlite_master WHERE type='table' AND name='transfers'").length > 0;
+    if (!hasTransfers) {
+      db.exec(`
+        CREATE TABLE transfers(
+          id TEXT PRIMARY KEY NOT NULL,
+          from_account_id TEXT NOT NULL REFERENCES accounts(id),
+          to_account_id TEXT NOT NULL REFERENCES accounts(id),
+          amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
+          date TEXT NOT NULL CHECK(length(date)=10),
+          note TEXT,
+          created_at TEXT NOT NULL,
+          CHECK(from_account_id != to_account_id)
+        ) STRICT;
+      `);
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS transfers_by_from_date ON transfers(from_account_id,date DESC,created_at DESC)");
+    db.exec("CREATE INDEX IF NOT EXISTS transfers_by_to_date ON transfers(to_account_id,date DESC,created_at DESC)");
+    const expenseColumns = rows("PRAGMA table_info(expenses)").map(({ name }) => name);
+    if (!expenseColumns.includes("transfer_id"))
+      db.exec("ALTER TABLE expenses ADD COLUMN transfer_id TEXT REFERENCES transfers(id)");
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS expenses_one_fee_per_transfer ON expenses(transfer_id) WHERE transfer_id IS NOT NULL");
+    const hasTransferOperations = rows("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_transfer_operations'").length > 0;
+    if (!hasTransferOperations) db.exec(`
+      CREATE TABLE pending_transfer_operations(
+        operation_id TEXT PRIMARY KEY NOT NULL REFERENCES transfers(id),
+        request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint)=64)
+      ) STRICT
+    `);
+    db.exec("PRAGMA user_version=6");
+  });
+}
+
 /**
  * Own the OPFS database lock for the connection lifetime and initialize SQLite.
- * Fresh stores are upgraded through v4; stored v1, v2, and v3 databases run each
+ * Fresh stores are upgraded through v6; stored v1 through v5 databases run each
  * required migration before a command can read or write data. A failed step
  * leaves that step's starting schema and records available for a later retry.
  * @throws {Error} OPFS or Web Locks is unavailable, another tab owns the database,
@@ -248,16 +285,29 @@ async function open() {
           if (version === 0) {
             transaction(createSchema);
             migrateExpenses();
-            migrateTransactions();
+            migrateIncomes();
+            migrateTransactionOperations();
+            migrateTransfers();
           } else if (version === 1) {
             migrateV1();
             migrateExpenses();
-            migrateTransactions();
+            migrateIncomes();
+            migrateTransactionOperations();
+            migrateTransfers();
           } else if (version === 2) {
             migrateExpenses();
-            migrateTransactions();
-          } else if (version === 3) migrateTransactions();
-          else if (version !== 4)
+            migrateIncomes();
+            migrateTransactionOperations();
+            migrateTransfers();
+          } else if (version === 3) {
+            migrateIncomes();
+            migrateTransactionOperations();
+            migrateTransfers();
+          } else if (version === 4) {
+            migrateTransactionOperations();
+            migrateTransfers();
+          } else if (version === 5) migrateTransfers();
+          else if (version !== 6)
             throw Error("Unsupported database version. Existing data has been preserved.");
           const lifetime = new Promise((done) => { release = done; });
           resolve();
@@ -360,8 +410,10 @@ function state() {
 
 const backupFormat = "kuwi.backup";
 const backupVersion = 1;
-const backupSchemaVersion = 4;
+const backupSchemaVersion = 6;
 const legacyBackupSchemaVersion = 3;
+const previousBackupSchemaVersion = 4;
+const transactionBackupSchemaVersion = 5;
 const backupCurrencies = { EUR: 2, GBP: 2, JPY: 0, PHP: 2, TWD: 2, USD: 2 };
 const backupCategories = [
   ["food", "Food", 0],
@@ -412,8 +464,8 @@ async function backupDigest(body) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Snapshot every v4 source relation in deterministic order and attach its integrity digest.
- * @returns {Promise<object>} A complete v1/v4 Kuwi backup envelope.
+/** Snapshot every current source relation in deterministic order and attach its integrity digest.
+ * @returns {Promise<object>} A complete v1/v6 Kuwi backup envelope.
  * @throws {Error} SQLite reads or Web Crypto digest generation fail.
  */
 async function createBackup() {
@@ -435,6 +487,7 @@ async function createBackup() {
     incomeCategories: rows("SELECT id, label, sort_order FROM income_categories ORDER BY sort_order, id"),
     incomes: rows("SELECT id, account_id, category_id, amount_minor, date, note, planned, created_at FROM incomes ORDER BY id"),
     pendingIncomeSyncOperations: rows("SELECT operation_id FROM pending_income_sync_operations ORDER BY operation_id"),
+    pendingTransactionOperations: rows("SELECT operation_id, transaction_kind, transaction_id, operation_type, request_fingerprint, created_at FROM pending_transaction_operations ORDER BY operation_id"),
   };
   const body = { format: backupFormat, version: backupVersion, schemaVersion: backupSchemaVersion, data };
   return {
@@ -518,14 +571,14 @@ function requireTimestamp(value, description) {
 /** Validate the v1 envelope, supported definitions, row constraints, and references without changing live tables.
  * Expense dates must be valid calendar dates no later than the browser's local date.
  * @param {unknown} backup - Parsed candidate file contents.
- * @returns {Promise<object>} The candidate's validated v4 relation rows.
+ * @returns {Promise<object>} The candidate's validated current relation rows.
  * @throws {Error} The format, version, integrity digest, schema, constraints, or references fail.
  */
 async function validateBackup(backup) {
   if (!backup || typeof backup !== "object" || Array.isArray(backup) || backup.format !== backupFormat)
     throw Error("This file is not a Kuwi backup.");
   if (backup.version !== backupVersion ||
-    ![legacyBackupSchemaVersion, backupSchemaVersion].includes(backup.schemaVersion))
+    ![legacyBackupSchemaVersion, previousBackupSchemaVersion, transactionBackupSchemaVersion, backupSchemaVersion].includes(backup.schemaVersion))
     throw Error("This Kuwi backup uses an unsupported version.");
   const expectedEnvelopeKeys = ["data", "exportedAt", "format", "integrity", "schemaVersion", "version"];
   if (Object.keys(backup).sort().join("\0") !== expectedEnvelopeKeys.sort().join("\0"))
@@ -548,19 +601,33 @@ async function validateBackup(backup) {
     throw Error("Backup data constraints failed: exportedAt is invalid.");
 
   const data = backup.data;
-  const legacy = backup.schemaVersion === legacyBackupSchemaVersion;
   const legacyRelations = ["accountAdjustments", "accounts", "categories", "currencies", "expenses", "pendingOperations", "pendingSyncOperations", "profiles", "setup"];
   const incomeRelations = [...legacyRelations, "incomeCategories", "incomes", "pendingIncomeSyncOperations"];
   const transferRelations = [...legacyRelations, "pendingTransferOperations", "transfers"];
-  const currentRelations = [...legacyRelations, "incomeCategories", "incomes", "pendingIncomeSyncOperations", "pendingTransferOperations", "transfers"];
+  const combinedRelations = [...incomeRelations, "pendingTransferOperations", "transfers"];
+  const incomeTransactionRelations = [...incomeRelations, "pendingTransactionOperations"];
+  const transferTransactionRelations = [...transferRelations, "pendingTransactionOperations"];
+  const combinedTransactionRelations = [...combinedRelations, "pendingTransactionOperations"];
+  const currentRelations = combinedTransactionRelations;
   const relationKeys = data && typeof data === "object" && !Array.isArray(data)
     ? Object.keys(data).sort().join("\0")
     : "";
   const keysFor = (relations) => [...relations].sort().join("\0");
-  const hasIncomeRelations = relationKeys === keysFor(incomeRelations) || relationKeys === keysFor(currentRelations);
-  const hasTransferRelations = relationKeys === keysFor(transferRelations) || relationKeys === keysFor(currentRelations);
+  const hasIncomeRelations = [incomeRelations, combinedRelations, incomeTransactionRelations, combinedTransactionRelations]
+    .some((relations) => relationKeys === keysFor(relations));
+  const hasTransferRelations = [transferRelations, combinedRelations, transferTransactionRelations, combinedTransactionRelations]
+    .some((relations) => relationKeys === keysFor(relations));
+  const hasTransactionOperations = [incomeTransactionRelations, transferTransactionRelations, combinedTransactionRelations]
+    .some((relations) => relationKeys === keysFor(relations));
+  const supportedRelations = backup.schemaVersion === legacyBackupSchemaVersion
+    ? [legacyRelations]
+    : backup.schemaVersion === previousBackupSchemaVersion
+      ? [incomeRelations, transferRelations, combinedRelations]
+      : backup.schemaVersion === transactionBackupSchemaVersion
+        ? [incomeTransactionRelations, transferTransactionRelations, combinedTransactionRelations]
+        : [currentRelations];
   if (!data || typeof data !== "object" || Array.isArray(data) ||
-    !(relationKeys === keysFor(legacyRelations) || hasIncomeRelations || hasTransferRelations))
+    !supportedRelations.some((relations) => relationKeys === keysFor(relations)))
     throw Error("Backup data constraints failed: the data set is incomplete or unsupported.");
   const currencies = requireRows(data, "currencies", ["code", "decimal_places"]);
   const profiles = requireRows(data, "profiles", ["id", "preferred_name", "preferred_currency"]);
@@ -587,6 +654,9 @@ async function validateBackup(backup) {
     : [];
   const pendingIncomeSync = hasIncomeRelations
     ? requireRows(data, "pendingIncomeSyncOperations", ["operation_id"])
+    : [];
+  const pendingTransactionOperations = hasTransactionOperations
+    ? requireRows(data, "pendingTransactionOperations", ["operation_id", "transaction_kind", "transaction_id", "operation_type", "request_fingerprint", "created_at"])
     : [];
 
   if (currencies.length !== Object.keys(backupCurrencies).length ||
@@ -615,6 +685,7 @@ async function validateBackup(backup) {
   const pendingIncomeIds = requireUnique(pendingIncomeSync, "operation_id", "pendingIncomeSyncOperations");
   const accountsById = new Map(accounts.map((row) => [row.id, row]));
   const transfersById = new Map(transfers.map((row) => [row.id, row]));
+  requireUnique(pendingTransactionOperations, "operation_id", "pendingTransactionOperations");
 
   if (profiles.length > 1 || (profiles.length === 1) !== (setupRows.length === 1) ||
     (setupRows.length === 1) !== (accounts.length > 0))
@@ -722,6 +793,27 @@ async function validateBackup(backup) {
   if (pendingIncomeIds.size !== incomeIds.size || [...pendingIncomeIds].some((id) => !incomeIds.has(id)))
     throw Error("Backup reference check failed: an income is missing its pending sync operation.");
 
+  const deletedTransactionKeys = new Set(
+    pendingTransactionOperations
+      .filter(({ operation_type }) => operation_type === "delete")
+      .map(({ transaction_kind, transaction_id }) => `${transaction_kind}:${transaction_id}`),
+  );
+  for (const operation of pendingTransactionOperations) {
+    requireText(operation.transaction_id, "pendingTransactionOperations.transaction_id");
+    if (!["expense", "income"].includes(operation.transaction_kind) ||
+      !["edit", "delete"].includes(operation.operation_type) ||
+      !/^[a-f0-9]{64}$/.test(operation.request_fingerprint))
+      throw Error("Backup data constraints failed: a pending transaction operation is invalid.");
+    const exists = operation.transaction_kind === "expense"
+      ? expenseIds.has(operation.transaction_id)
+      : incomeIds.has(operation.transaction_id);
+    const wasDeleted = deletedTransactionKeys.has(`${operation.transaction_kind}:${operation.transaction_id}`);
+    if ((operation.operation_type === "delete" && exists) ||
+      (operation.operation_type === "edit" && !exists && !wasDeleted))
+      throw Error("Backup reference check failed: a transaction operation is orphaned.");
+    requireTimestamp(operation.created_at, "pendingTransactionOperations.created_at");
+  }
+
   return {
     ...data,
     expenses: expenses.map((expense) => ({ ...expense, transfer_id: expense.transfer_id ?? null })),
@@ -730,18 +822,20 @@ async function validateBackup(backup) {
     incomeCategories,
     incomes,
     pendingIncomeSyncOperations: pendingIncomeSync,
+    pendingTransactionOperations,
   };
 }
 
-/** Replace v4 records atomically; callers must validate the candidate before calling.
- * @param {object} data - Complete v4 relations returned by `validateBackup`.
- * @returns {void} Resolves after SQLite commits the replacement.
+/** Replace current records atomically; callers must validate the candidate before calling.
+ * @param {object} data - Complete current relations returned by `validateBackup`.
+ * @returns {void} Returns after SQLite commits the replacement.
  * @throws {Error} SQLite rejects a delete, insert, constraint, or commit.
  */
 function replaceBackupData(data) {
   transaction(() => {
     db.exec(`
       DELETE FROM pending_transfer_operations;
+      DELETE FROM pending_transaction_operations;
       DELETE FROM pending_income_sync_operations;
       DELETE FROM incomes;
       DELETE FROM pending_sync_operations;
@@ -779,6 +873,7 @@ function replaceBackupData(data) {
     insertRows("incomes", ["id", "account_id", "category_id", "amount_minor", "date", "note", "planned", "created_at"], data.incomes);
     insertRows("pending_income_sync_operations", ["operation_id"], data.pendingIncomeSyncOperations);
     insertRows("pending_transfer_operations", ["operation_id", "request_fingerprint"], data.pendingTransferOperations);
+    insertRows("pending_transaction_operations", ["operation_id", "transaction_kind", "transaction_id", "operation_type", "request_fingerprint", "created_at"], data.pendingTransactionOperations);
   });
 }
 
@@ -794,9 +889,10 @@ async function restoreBackup(backup) {
 }
 
 /**
- * Return one account, canonical categories, and its combined transaction history.
+ * Return one account, all account balances, canonical categories, and its transaction history.
  * @param {string} [accountId] - Account ID; omitted to use the setup account.
- * @returns {object|null} The account ledger, or null when the requested account is unavailable.
+ * @returns {object|null} The selected account, full account list, category lists, and
+ *   that account's transactions; null when the requested account is unavailable.
  */
 function readLedger(accountId) {
   const firstAccountId = rows("SELECT first_account_id FROM setup WHERE id=1")[0]?.first_account_id;
@@ -804,19 +900,20 @@ function readLedger(accountId) {
   if (!selectedAccount) return null;
   return {
     account: selectedAccount,
+    accounts: accountList(),
     expense_categories: rows("SELECT id, label FROM categories ORDER BY sort_order"),
     income_categories: rows("SELECT id, label FROM income_categories ORDER BY sort_order"),
     transactions: rows(
       `SELECT 'expense' AS kind, e.id, e.account_id, e.category_id,
         c.label AS category_label, e.amount_minor, e.date, e.note, e.created_at,
-        0 AS planned
+        0 AS planned, e.transfer_id
        FROM expenses e JOIN categories c ON c.id=e.category_id
        JOIN pending_sync_operations p ON p.operation_id=e.id
        WHERE e.account_id=?
       UNION ALL
        SELECT 'income' AS kind, i.id, i.account_id, i.category_id,
         c.label AS category_label, i.amount_minor, i.date, i.note, i.created_at,
-        i.planned
+        i.planned, NULL AS transfer_id
        FROM incomes i LEFT JOIN income_categories c ON c.id=i.category_id
        JOIN pending_income_sync_operations p ON p.operation_id=i.id
        WHERE i.account_id=?
@@ -868,7 +965,8 @@ function isValidDate(value) {
  * ledger; reuse with different account, category, amount, date, or note fails.
  * @param {object} args - Expense operation ID, account/category IDs, positive minor units, date, and optional note.
  * @returns {{ledger: object, replayed: boolean}} The refreshed account ledger and whether this was a retry.
- * @throws {Error} Invalid fields, unavailable references, a conflicting retry, or a failed database write.
+ * @throws {Error} Invalid fields, unavailable references, a conflicting retry,
+ *   reuse of a deleted transaction ID, or a failed database write.
  */
 function createExpense(args) {
   const operationId = args.operationId?.trim();
@@ -888,6 +986,11 @@ function createExpense(args) {
 
   let replayed = false;
   transaction(() => {
+    if (rows(
+      "SELECT operation_id FROM pending_transaction_operations WHERE transaction_kind='expense' AND transaction_id=? AND operation_type='delete'",
+      [operationId],
+    )[0])
+      throw Error("This expense ID was already deleted and cannot be reused.");
     const existing = rows(
       `SELECT e.account_id, e.category_id, e.amount_minor, e.date, e.note
        FROM expenses e JOIN pending_sync_operations p ON p.operation_id=e.id
@@ -927,7 +1030,8 @@ function createExpense(args) {
  * @param {object} args - Operation ID, Debit/Credit account ID, optional category ID,
  *   nonnegative account-currency minor units, valid date, and optional note.
  * @returns {{ledger: object, replayed: boolean}} The refreshed ledger and whether this was a retry.
- * @throws {Error} Invalid fields, unavailable references, a conflicting retry, or a failed database write.
+ * @throws {Error} Invalid fields, unavailable references, a conflicting retry,
+ *   reuse of a deleted transaction ID, or a failed database write.
  */
 function createIncome(args) {
   const operationId = typeof args.operationId === "string" ? args.operationId.trim() : "";
@@ -957,6 +1061,11 @@ function createIncome(args) {
 
   let replayed = false;
   transaction(() => {
+    if (rows(
+      "SELECT operation_id FROM pending_transaction_operations WHERE transaction_kind='income' AND transaction_id=? AND operation_type='delete'",
+      [operationId],
+    )[0])
+      throw Error("This income ID was already deleted and cannot be reused.");
     const existing = rows(
       `SELECT i.account_id, i.category_id, i.amount_minor, i.date, i.note, i.planned
        FROM incomes i JOIN pending_income_sync_operations p ON p.operation_id=i.id
@@ -1059,6 +1168,150 @@ async function createTransfer(args) {
     });
   });
   return { accounts: accountList(), ledger: readLedger(fromAccountId), replayed };
+}
+
+/**
+ * Replace one saved expense or income and store its stable edit receipt atomically.
+ * The transaction ID and creation time remain fixed. Balances derive old and
+ * replacement account effects from the committed row.
+ * @param {object} args - Stable operation ID, target ID, kind, current account ID,
+ *   replacement account/category/amount/date/note. Amounts use minor units and
+ *   replacement accounts must use the original currency.
+ * @returns {Promise<{ledger: object, replayed: boolean}>} The refreshed current-account ledger.
+ * @throws {Error} Invalid values or references, future/planned edit boundaries,
+ *   conflicting retries, or failed writes.
+ */
+async function updateTransaction(args) {
+  const operationId = typeof args.operationId === "string" ? args.operationId.trim() : "";
+  const transactionId = typeof args.transactionId === "string" ? args.transactionId.trim() : "";
+  const kind = args.kind;
+  const accountId = args.accountId;
+  const date = args.date;
+  const note = typeof args.note === "string" ? args.note.trim() || null : null;
+  const categoryId = kind === "expense"
+    ? (typeof args.categoryId === "string" ? args.categoryId.trim() || "other" : "")
+    : (typeof args.categoryId === "string" ? args.categoryId.trim() || null : null);
+  const amountMinor = args.amountMinor;
+
+  if (!operationId || !transactionId || !["expense", "income"].includes(kind))
+    throw Error("This transaction could not be updated.");
+  if (!Number.isSafeInteger(amountMinor) || amountMinor < (kind === "expense" ? 1 : 0))
+    throw Error(kind === "expense" ? "Enter an expense amount greater than zero." : "Enter a valid income amount.");
+  if (!isValidDate(date)) throw Error(`Choose a valid ${kind} date.`);
+  if (kind === "expense" && date > localDate())
+    throw Error("Choose today or an earlier date.");
+  if (kind === "income" && date > localDate())
+    throw Error("Editing future-dated income is unavailable until planned-entry rules are verified.");
+  if (kind === "income" && amountMinor === 0)
+    throw Error("Enter an income amount greater than zero.");
+  if (args.note != null && typeof args.note !== "string")
+    throw Error(`Enter a valid ${kind} note.`);
+
+  const selectedAccount = account(accountId);
+  if (!selectedAccount || (kind === "income" && !["debit", "credit"].includes(selectedAccount.type)))
+    throw Error(kind === "income"
+      ? "Choose an available debit or credit account."
+      : "Choose an available account.");
+  if (kind === "expense" && !rows("SELECT id FROM categories WHERE id=?", [categoryId])[0])
+    throw Error("Choose a valid expense category.");
+  if (kind === "income" && categoryId && !rows("SELECT id FROM income_categories WHERE id=?", [categoryId])[0])
+    throw Error("Choose a valid income category.");
+
+  const planned = kind === "income" && date > localDate();
+  const content = {
+    operationType: "edit", transactionKind: kind, transactionId, accountId,
+    categoryId, amountMinor, date, note, planned: Number(planned),
+  };
+  const fingerprint = await requestFingerprint(content);
+  let replayed = false;
+  let ledgerAccountId = args.currentAccountId || accountId;
+  transaction(() => {
+    const receipt = rows(
+      "SELECT transaction_kind, transaction_id, operation_type, request_fingerprint FROM pending_transaction_operations WHERE operation_id=?",
+      [operationId],
+    )[0];
+    if (receipt) {
+      if (receipt.transaction_kind !== kind || receipt.transaction_id !== transactionId ||
+        receipt.operation_type !== "edit" || receipt.request_fingerprint !== fingerprint)
+        throw Error("This edit retry contains different transaction details.");
+      replayed = true;
+      return;
+    }
+
+    const table = kind === "expense" ? "expenses" : "incomes";
+    const previous = rows(
+      `SELECT t.account_id, a.currency_code, ${kind === "income" ? "t.planned" : "0 AS planned"},
+        ${kind === "expense" ? "t.transfer_id" : "NULL AS transfer_id"}
+       FROM ${table} t JOIN accounts a ON a.id=t.account_id WHERE t.id=?`,
+      [transactionId],
+    )[0];
+    if (!previous) throw Error("This transaction is no longer available.");
+    if (previous.transfer_id)
+      throw Error("A transfer fee can only be changed with its transfer.");
+    if (kind === "income" && previous.planned)
+      throw Error("Editing planned income is unavailable until planned-entry rules are verified.");
+    if (selectedAccount.currency_code !== previous.currency_code)
+      throw Error("Choose an account using the same currency.");
+    ledgerAccountId = args.currentAccountId || previous.account_id;
+    const updateSql = kind === "expense"
+      ? "UPDATE expenses SET account_id=?, category_id=?, amount_minor=?, date=?, note=? WHERE id=?"
+      : "UPDATE incomes SET account_id=?, category_id=?, amount_minor=?, date=?, note=?, planned=? WHERE id=?";
+    const values = [accountId, categoryId, amountMinor, date, note];
+    if (kind === "income") values.push(Number(planned));
+    values.push(transactionId);
+    db.exec({ sql: updateSql, bind: values });
+    db.exec({
+      sql: "INSERT INTO pending_transaction_operations(operation_id, transaction_kind, transaction_id, operation_type, request_fingerprint, created_at) VALUES(?,?,?,?,?,?)",
+      bind: [operationId, kind, transactionId, "edit", fingerprint, new Date().toISOString()],
+    });
+  });
+  return { ledger: readLedger(ledgerAccountId), replayed };
+}
+
+/** Remove one expense or income and retain its delete receipt as a tombstone.
+ * @param {object} args - Stable operation ID, target ID and kind, and current account ID.
+ * @returns {Promise<{ledger: object, replayed: boolean}>} The refreshed current-account ledger.
+ * @throws {Error} The target is unavailable, the operation ID conflicts, or a database write fails.
+ */
+async function deleteTransaction(args) {
+  const operationId = typeof args.operationId === "string" ? args.operationId.trim() : "";
+  const transactionId = typeof args.transactionId === "string" ? args.transactionId.trim() : "";
+  const kind = args.kind;
+  if (!operationId || !transactionId || !["expense", "income"].includes(kind))
+    throw Error("This transaction could not be deleted.");
+  const fingerprint = await requestFingerprint({
+    operationType: "delete", transactionKind: kind, transactionId,
+  });
+  let replayed = false;
+  let ledgerAccountId = args.currentAccountId || "";
+  transaction(() => {
+    const receipt = rows(
+      "SELECT transaction_kind, transaction_id, operation_type, request_fingerprint FROM pending_transaction_operations WHERE operation_id=?",
+      [operationId],
+    )[0];
+    if (receipt) {
+      if (receipt.transaction_kind !== kind || receipt.transaction_id !== transactionId ||
+        receipt.operation_type !== "delete" || receipt.request_fingerprint !== fingerprint)
+        throw Error("This delete retry refers to a different transaction.");
+      replayed = true;
+      return;
+    }
+
+    const table = kind === "expense" ? "expenses" : "incomes";
+    const pendingTable = kind === "expense" ? "pending_sync_operations" : "pending_income_sync_operations";
+    const previous = rows(`SELECT account_id, ${kind === "expense" ? "transfer_id" : "NULL AS transfer_id"} FROM ${table} WHERE id=?`, [transactionId])[0];
+    if (!previous) throw Error("This transaction is no longer available.");
+    if (previous.transfer_id)
+      throw Error("A transfer fee can only be removed with its transfer.");
+    ledgerAccountId = args.currentAccountId || previous.account_id;
+    db.exec({
+      sql: "INSERT INTO pending_transaction_operations(operation_id, transaction_kind, transaction_id, operation_type, request_fingerprint, created_at) VALUES(?,?,?,?,?,?)",
+      bind: [operationId, kind, transactionId, "delete", fingerprint, new Date().toISOString()],
+    });
+    db.exec({ sql: `DELETE FROM ${pendingTable} WHERE operation_id=?`, bind: [transactionId] });
+    db.exec({ sql: `DELETE FROM ${table} WHERE id=?`, bind: [transactionId] });
+  });
+  return { ledger: readLedger(ledgerAccountId), replayed };
 }
 
 /**
@@ -1254,6 +1507,8 @@ async function dispatch({ id, command, args = {} }) {
     else if (command === "createExpense") result = createExpense(args);
     else if (command === "createIncome") result = createIncome(args);
     else if (command === "createTransfer") result = await createTransfer(args);
+    else if (command === "updateTransaction") result = await updateTransaction(args);
+    else if (command === "deleteTransaction") result = await deleteTransaction(args);
     else if (command === "complete") result = await complete(args);
     else if (command === "exportBackup") result = await createBackup();
     else if (command === "restoreBackup") result = await restoreBackup(args.backup);

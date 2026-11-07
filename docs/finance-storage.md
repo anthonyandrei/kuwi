@@ -1,107 +1,93 @@
 # Local finance storage
 
-The browser database uses strict SQLite tables and ordered `PRAGMA user_version`
-migrations. Version 1 stores the profile, first account, currency definitions,
-and setup references. Version 2 adds account types, balance adjustments, and
-stable account operation records. Its migration carries profile, account, and
-setup IDs forward and turns each nonzero opening balance into an initial
-adjustment. Version 3 adds expense categories, expenses, pending sync markers,
-and an account/date index. Version 4 adds income categories and records, same
-currency transfers, linked transfer fees, and their pending operation records.
+Kuwi stores account and transaction facts in strict SQLite tables in OPFS. It
+uses ordered `PRAGMA user_version` migrations and derives balances from ledger
+rows rather than keeping a mutable balance copy.
 
-Opening a version 1 database runs the account migration, expense migration,
-and version 4 migration in order. Version 2 runs the expense and version 4
-migrations; version 3 runs version 4. Each migration commits in its own
-transaction. Income and transfer relations are added together in the version 4
-transaction. A failure leaves its starting schema and records available for
-retry. A new database creates the version 2 account schema before applying
-versions 3 and 4.
+## Schema versions
 
-The current relations are:
+Version 1 stores the profile, first account, currency definitions, and setup.
+Version 2 adds account types, opening balance adjustments, and stable account
+operation records. The migration carries profile, account, and setup IDs
+forward and turns each nonzero opening amount into an initial adjustment.
+Version 3 adds expense categories, expenses, pending sync markers, and an
+account/date index. Version 4 adds income categories, incomes, pending income
+sync markers, and an account/date index. Version 5 adds transaction
+edit/delete receipts. Version 6 adds transfers, linked fee references on
+expenses, and pending transfer operations.
 
-```text
-setup -> profiles
-setup -> accounts -> currencies
-account_adjustments -> accounts
-pending_operations -> accounts
-expenses -> accounts
-expenses -> categories
-pending_sync_operations -> expenses
-incomes -> accounts
-incomes -> income_categories
-pending_income_sync_operations -> incomes
-transfers -> accounts (source and destination)
-expenses.transfer_id -> transfers
-pending_transfer_operations -> transfers
-```
+A new database builds through versions 2, 3, 4, 5, and 6. Version 1 migrates
+through the same sequence. Version 2 runs migrations 3 through 6, version 3
+runs migrations 4 through 6, version 4 runs migrations 5 and 6, and version 5
+runs migration 6. Each migration commits in its own transaction. A failed step
+keeps its starting schema and data for a retry.
 
-`expenses.id` is the stable expense operation ID in its
-`pending_sync_operations.operation_id` row. A linked transfer fee is an
-ordinary expense in the canonical `fees` category. Its nullable `transfer_id`
-references the transfer that caused it. The amount is stored once, on the fee
-expense. Both rows have their own pending sync record.
+The v6 migration supports both earlier v4 layouts. Income-only v4 databases
+receive transfer relations, and v4 databases that already contain transfers
+keep their transfer data. It also upgrades v5 databases that already have
+transaction receipts. Populated v4 and v5 fixtures check account, expense,
+income, and sync marker identities after upgrade.
 
-`incomes.id` is the stable operation ID in its
-`pending_income_sync_operations.operation_id` row. Income rows store an account
-ID, nullable category ID, nonnegative minor units, date, optional note, planned
-flag, and creation time. Only future dated entries may be planned at entry
-time, and a zero amount is allowed only for a planned entry. Income categories
-keep built in labels and display order canonical. An identical retry returns
-the saved income; reusing its ID with changed content fails.
+## Ledger writes and balances
 
-`transfers.id` is also the operation ID in `pending_transfer_operations`.
-That row stores a SHA-256 fingerprint of the normalized request. A transfer
-stores its source, destination, principal, date, note, and creation time. The
-source must be Debit or Credit, the destination must be a different Debit
-account, and both accounts must use the same currency. The source must cover
-the principal plus any fee. A transfer and its optional fee expense, both sync
-markers, and the stable retry record commit in one immediate transaction.
-An identical retry has one effect; reuse of its ID with changed content fails.
+An expense and its pending sync marker commit together. Income and its pending
+sync marker use the same transaction boundary. Transfers write the principal,
+optional linked fee expense, fee sync marker, and pending transfer operation in
+one immediate transaction. The operation ID remains stable across retries. An
+identical retry returns the saved ledger; reusing the ID with different
+transfer details fails. A failed write rolls back all transfer effects.
 
-Balances derive from adjustments, expenses, posted income, and transfer
-principal. Current and past ordinary expenses reduce Debit and Assets balances
-and increase Credit debt. Posted income adds to Debit and Assets balances and
-reduces Credit debt. A transfer immediately reduces the source by its principal
-and increases the debit destination by the same amount. A linked fee reduces
-the source as an expense, including when the selected transfer date is in the
-future. A Credit source owes both principal and fee. Planned income does not
-affect balances. The app stores no mutable balance copy. Accounts with
-expenses, income, or transfers count as active, so their currency and starting
-balance stay fixed in the account editor.
+A transfer source must be Debit or Credit, and the destination must be a
+different Debit account. Both accounts must use the same currency. The source
+must have enough balance or available credit to cover principal plus fee. A
+positive fee is stored as an expense in the Fees category and references the
+transfer ID. The fee name is `Bank transfer fee to <destination>`. The transfer
+uses the selected date, including future dates, and affects balances
+immediately.
 
-Migration order is v1 to v2 to v3 to v4. Each migration preserves existing
-records and references. The populated v3 upgrade fixture checks that account
-and expense history survive a failed version 4 migration and become available
-again after retry. Cloud sync delivery must retain operation IDs and define how
-acknowledged transaction records remain available to history.
+The app derives Debit and Assets balances from adjustments, expenses, posted
+income, and transfer principal. Expenses reduce those balances; posted income
+adds to them. Credit expenses increase the amount owed and posted income lowers
+it. Transfer principal reduces the source balance or increases its Credit debt,
+and increases the Debit destination balance. A fee reduces the source balance
+or increases its Credit debt. Planned income does not affect balances.
 
-## Product backup contract
+Editing an expense or income replaces its account, category, amount, date, and
+note while preserving its ID and creation time. The replacement and edit receipt
+commit together. Deleting a transaction, removing its create sync marker, and
+writing its delete receipt also commit together. Receipt IDs provide stable
+retries and retain deleted transaction IDs. Editing can move a transaction only
+between accounts with the same currency. Planned income can be deleted, while
+editing planned income remains blocked pending verification of its posting
+transition. Linked transfer fees are controlled by their transfer and cannot
+be edited or deleted as ordinary expenses.
+
+## Backup contract
 
 Exports use a JSON envelope with `format: "kuwi.backup"`, backup `version: 1`,
-`schemaVersion: 4`, an ISO `exportedAt`, and an integrity object containing
+`schemaVersion: 6`, an ISO `exportedAt`, and an integrity object with
 `algorithm: "SHA-256"` and a lowercase digest. The digest covers the canonical
 JSON form of `format`, `version`, `schemaVersion`, and `data`. Object keys are
-sorted recursively before hashing; array order is retained. The current v4
-data includes currencies, profiles, accounts, adjustments, setup, pending
-account operations, expense categories and records, pending expense sync
-markers, income categories and records, pending income sync markers, transfer
-records, and pending transfer operations. The exported `fee_amount_minor` is
-derived from the linked fee expense; joined labels and account balances are
-also derived.
+sorted recursively before hashing, and array order is retained.
 
-Restore accepts the original v3 contract, the earlier income only and transfer
-only v4 contracts, and the current combined v4 contract. It checks the
-integrity digest, exact relation fields, SQLite value constraints, and
-references before replacing data. For v3 backups, restore adds canonical income
-categories and empty income and transfer ledgers. For an income only v4 backup,
-restore adds empty transfer relations. For a transfer only v4 backup, restore
-adds canonical income categories and an empty income ledger. Transfer backups
-require same currency, eligible accounts, a positive principal, a matching
+Current v6 data includes currencies, profiles, accounts, adjustments, setup,
+pending account operations, expense categories and records, pending expense
+sync markers, income categories and records, pending income sync markers,
+transfers, pending transfer operations, and transaction edit/delete receipts.
+The exported `fee_amount_minor` is derived from the linked fee expense. Joined
+labels and balances are also derived.
+
+Restore accepts v3 backups without income or transfer relations, v4 backups
+from income-only and transfer-only builds, v4 backups containing both feature
+sets, v5 backups with transaction receipts, and current v6 backups. It checks
+the digest, exact relation fields,
+SQLite value constraints, unique keys, and references before replacing data.
+Legacy formats gain canonical empty relations when restored. A transfer backup
+must contain eligible same-currency accounts, a positive principal, a matching
 linked fee expense when a fee is present, and a pending operation marker.
+Replacement runs inside one immediate transaction. A failed write leaves the
+previous store intact.
 
-After validation, the worker replaces rows in foreign key order inside one
-immediate transaction. A write error rolls the full replacement back. The app
-reloads visible setup and balances only after commit. Backup `version`
-identifies the backup contract; `schemaVersion` identifies the source SQLite
-schema. Current exports use v1/v4. The importer keeps the earlier v1/v3 and
-single feature v1/v4 formats readable.
+Cloud delivery is outside this local storage stage. Future sync work must keep
+stable operation IDs and define how acknowledged transactions remain available
+to history.

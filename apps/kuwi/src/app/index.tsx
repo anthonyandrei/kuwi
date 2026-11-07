@@ -475,9 +475,7 @@ export default function Home() {
                   setSelectedAccount(next.account);
                   setSaved((current) => current ? {
                     ...current,
-                    accounts: current.accounts.map((item) =>
-                      item.id === next.account.id ? next.account : item,
-                    ),
+                    accounts: next.accounts,
                   } : current);
                 }}
               />

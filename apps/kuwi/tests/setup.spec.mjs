@@ -108,12 +108,12 @@ const test = base.extend({
       if (storageFault.current === "downgrade-v2")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE transfers; DROP TABLE incomes; DROP TABLE income_categories; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE transfers; DROP TABLE incomes; DROP TABLE income_categories; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "downgrade-v3")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV3") { transaction(() => db.exec("DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; DROP INDEX expenses_one_fee_per_transfer; ALTER TABLE expenses DROP COLUMN transfer_id; DROP TABLE transfers; PRAGMA user_version=3;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV3") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; DROP INDEX expenses_one_fee_per_transfer; ALTER TABLE expenses DROP COLUMN transfer_id; DROP TABLE transfers; PRAGMA user_version=3;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "account-rename")
         return source.replace(
@@ -127,8 +127,8 @@ const test = base.extend({
         );
       if (storageFault.current === "transactions-migration")
         return source.replace(
-          "function migrateTransactions() {",
-          'function migrateTransactions() { if (!globalThis.__incomeMigrationFailed) { globalThis.__incomeMigrationFailed = true; transaction(() => { db.exec("CREATE TABLE income_migration_trial(id INTEGER PRIMARY KEY)"); throw Error("Simulated version 4 migration failure"); }); }',
+          "function migrateIncomes() {",
+          'function migrateIncomes() { if (!globalThis.__incomeMigrationFailed) { globalThis.__incomeMigrationFailed = true; transaction(() => { db.exec("CREATE TABLE income_migration_trial(id INTEGER PRIMARY KEY)"); throw Error("Simulated version 4 migration failure"); }); }',
         );
       throw Error("Unknown test fault");
     });
@@ -1037,6 +1037,8 @@ test("same-currency transfer moves funds, records its fee, and reopens offline",
     await expect(page.getByText("Move emergency cash", { exact: true })).toBeVisible();
     await expect(page.getByText("Transfer to Savings", { exact: true })).toBeVisible();
     await expect(page.getByText("Bank transfer fee to Savings", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Edit Bank transfer fee to Savings", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Delete Bank transfer fee to Savings", exact: true })).toHaveCount(0);
     await expect(page.getByText(/Fees · .* · Cash/)).toBeVisible();
     await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
 
@@ -1051,6 +1053,8 @@ test("same-currency transfer moves funds, records its fee, and reopens offline",
     await page.getByRole("button", { name: "Transaction history", exact: true }).click();
     await expect(page.getByText("Move emergency cash", { exact: true })).toBeVisible();
     await expect(page.getByText("Bank transfer fee to Savings", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Edit Bank transfer fee to Savings", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Delete Bank transfer fee to Savings", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Back to account", exact: true }).click();
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
     await page.getByRole("button", { name: "View account Savings", exact: true }).click();

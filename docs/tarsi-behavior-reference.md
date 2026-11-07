@@ -339,11 +339,73 @@ currency route's supported list and native behavior still need verification.
 See [the account data model](account-data-model.md) for the bounded Kuwi
 behavior implemented from these findings.
 
+## Ordinary transaction edits and deletions
+
+Checked 2026-11-07 from the expense entry chunk (Metro module 2591), income
+entry chunk (module 2617), and store module 1685. The expense chunk is
+`add-expense-940caf825558b98d213bfca3fef5e6bd.js` with SHA-256
+`98677be132d94743c935cf788959c44ff21ffe3829226355dc21f7cdbdeb0c83`. The
+income chunk is `add-income-c54847041456330b5c6bb44f04331180.js` with SHA-256
+`4ae172ffa99f05be1a4a840b8a9368b0f9154656eb686b4b7091aa7c95d5520e`. The
+income route map and direct dependencies are in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-income-20261107/provenance.json`;
+the expense chunk provenance is in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-web-lazy-20261107/provenance.json`.
+Both chunks depend on store module 1685. Currency rounding, balance effects,
+and category data come from modules 1701, 1709, 1728, and 1730. These are static
+web code traces. The target code was not executed, and iPhone 2.5.9 behavior is
+not established.
+
+The store's `updateExpense` path reverses the old posted effect on its original
+account, reverses linked cashback income, builds the replacement while keeping
+the expense ID and creation time, applies an eligible replacement effect, and
+reconciles recurring or installment state. `deleteExpense` reverses a posted effect and
+removes the expense. Its extra paths remove linked cashback income and
+installments; loan and installment relationships can block deletion. The
+ordinary expense entry UI also exposes an `expenseId` edit route and calls the
+store's update and delete methods.
+
+The store's `updateIncome` path reverses the old posted effect, builds the
+replacement with the same ID and creation time, posts an eligible replacement,
+and updates related goal, receipt, and recurring state. `deleteIncome` reverses
+the old posted effect, removes the income, clears cashback and receipt
+references, and reconciles recurring income. The ordinary income entry UI uses
+an `incomeId` edit route and calls these same store methods. These linked
+behaviors identify records that need coordinated changes in Tarsi. Kuwi's
+bounded one-time ledger has no cashback, receipt, goal, recurring, installment,
+or loan child records, so this implementation does not invent those
+relationships.
+
+Kuwi replaces an ordinary expense or income row in one SQLite transaction,
+preserving its transaction ID and creation time. The same transaction records a
+fingerprinted edit receipt. A delete removes the transaction and its create
+sync marker while adding a delete tombstone. Identical retries reuse their
+operation ID; reusing one with different content fails. Balances are derived
+from transaction rows, so replacing an account or amount changes the old and
+new account balances at the same commit. The UI permits account moves only
+between same-currency accounts and supports category, amount, date, and note
+replacement. It accepts current and past expenses and posted income. Planned
+income edits are blocked pending the separate date-boundary work in ticket #7.
+Transfer editing is outside this ticket.
+
+For a derived expense calculation, begin with Debit accounts A = ₱1,000 and B =
+₱200. Posting a ₱12 expense to A gives A = ₱988. Editing it to ₱20 on B gives A
+= ₱1,000 and B = ₱180. Deleting it returns B to ₱200. For income, posting ₱25
+to A gives A = ₱1,025. Editing it to ₱35 on B returns A to ₱1,000 and gives B =
+₱235. Deleting it returns B to ₱200. These are arithmetic examples from the
+traced balance rules, not observed Tarsi runs.
+
+The edit/delete trace establishes the shipped web store paths only. It does not
+confirm iPhone behavior, transfer corrections, cross-currency replacement, or
+how future-dated income changes from planned to posted. Those remain explicit
+acceptance blockers.
+
 ## Next evidence needed
 
 - Extend the observed iPhone first-run path with validation and currency edge cases.
-- Trace built-in categories, budget cycles, editing/deletion reversal, and
-  amount/currency edge cases before defining their acceptance criteria.
+- Trace built-in category overrides, budget cycles, advanced linked transaction
+  corrections, and currency edge cases before defining their acceptance
+  criteria.
 - Trace cloud snapshot synchronization and observe conflicting edits before
   accepting a conflict policy.
 - Inventory the remaining screens, gestures, and mascot assets. No complete
