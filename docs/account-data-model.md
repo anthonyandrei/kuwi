@@ -57,6 +57,7 @@ Credit accounts; the recovered income form does not offer Assets accounts.
 | `income_categories` | `id` | Canonical label and display order for built-in income categories. |
 | `incomes` | `id` | `account_id` → `accounts.id`, optional `category_id` → `income_categories.id`, nonnegative minor units, date, optional note, planned flag, `created_at`. |
 | `pending_income_sync_operations` | `operation_id` | `operation_id` → `incomes.id`; marks an income creation for local sync. |
+| `pending_transaction_operations` | `operation_id` | Transaction kind and ID, edit/delete type, request fingerprint, and creation time. Delete receipts retain IDs after their transaction row is removed. |
 
 The non-key dependencies are `code → decimal_places`, `profile id → preferred
 name, preferred currency`, `account id → name, type, currency, credit limit,
@@ -64,8 +65,11 @@ creation time`, `adjustment id → account id, amount, kind, creation time`,
 `operation id → account id, operation type, request fingerprint, creation
 time`, `category id → label, display order`, `expense id → account, category,
 amount, date, note, creation time`, and `income id → account, optional
-category, amount, date, note, planned state, creation time`. `setup.id`
-identifies one profile and its first account.
+category, amount, date, note, planned state, creation time`. Transaction
+operation IDs determine the kind, transaction ID, edit/delete type, fingerprint,
+and creation time. This relation has no foreign key because delete receipts must
+outlive their transaction rows. `setup.id` identifies one profile and its first
+account.
 
 Balances combine `account_adjustments` with posted expense and income effects;
 the app does not store another mutable balance on `accounts`. Account name and
@@ -86,6 +90,16 @@ it with different content fails. The queue row keeps an account reference and a
 fixed-size content fingerprint rather than copying the account fields. Local
 storage remains usable without sign-in; cloud delivery is outside this stage.
 
+Expense and income edits keep the transaction ID and creation time, replace the
+account/category/amount/date/note fields, and write an edit receipt in one
+transaction. Delete removes the transaction and its create sync marker while
+writing a delete receipt in the same transaction. The receipt fingerprint
+supports stable retries and rejects an operation ID reused with different
+content. Balances are derived from the resulting rows, so a move between
+accounts updates both balances from one committed replacement. Account changes
+in this form require the same currency. Planned income can be deleted, while
+its edit remains blocked pending verification of its posting transition.
+
 ## Migration
 
 Schema version 1 stored `opening_balance_minor` directly on `accounts`.
@@ -104,7 +118,12 @@ account/date index. It runs in one transaction after the expense migration.
 Failure leaves version 3 and its expense history intact. Existing account,
 expense, category, and setup IDs are preserved.
 
+Version 5 adds the transaction edit/delete receipt table in one transaction.
+The migration preserves account and transaction IDs from version 4. The
+populated v4 upgrade fixture checks existing account, expense, income, and sync
+marker identities after migration.
+
 The adjustment table currently accepts initial balances only. Manual balance
-adjustments, account deletion, loan schedules, investments, transfers, backup
-data, and cloud-sync delivery need their own verified rules and schema changes
-before implementation.
+adjustments, account deletion, loan schedules, investments, transfers, and
+cloud-sync delivery need their own verified rules and schema changes before
+implementation.

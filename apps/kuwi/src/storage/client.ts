@@ -35,6 +35,7 @@ export type TransactionRecord = {
 };
 export type TransactionLedger = {
   account: Account;
+  accounts: Account[];
   expense_categories: ExpenseCategory[];
   income_categories: IncomeCategory[];
   transactions: TransactionRecord[];
@@ -54,6 +55,23 @@ export type CreateIncomeInput = {
   amountMinor: number;
   date: string;
   note?: string;
+};
+export type UpdateTransactionInput = {
+  operationId: string;
+  transactionId: string;
+  kind: TransactionRecord["kind"];
+  currentAccountId: string;
+  accountId: string;
+  categoryId?: string;
+  amountMinor: number;
+  date: string;
+  note?: string;
+};
+export type DeleteTransactionInput = {
+  operationId: string;
+  transactionId: string;
+  kind: TransactionRecord["kind"];
+  currentAccountId: string;
 };
 export type CreateTransactionResult = {
   ledger: TransactionLedger;
@@ -117,6 +135,14 @@ export type BackupIncome = {
   created_at: string;
 };
 export type BackupPendingIncomeSyncOperation = { operation_id: string };
+export type BackupPendingTransactionOperation = {
+  operation_id: string;
+  transaction_kind: TransactionRecord["kind"];
+  transaction_id: string;
+  operation_type: "edit" | "delete";
+  request_fingerprint: string;
+  created_at: string;
+};
 export type ProductBackupData = {
   currencies: BackupCurrency[];
   profiles: BackupProfile[];
@@ -130,11 +156,12 @@ export type ProductBackupData = {
   incomeCategories: BackupIncomeCategory[];
   incomes: BackupIncome[];
   pendingIncomeSyncOperations: BackupPendingIncomeSyncOperation[];
+  pendingTransactionOperations: BackupPendingTransactionOperation[];
 };
 export type ProductBackup = {
   format: "kuwi.backup";
   version: 1;
-  schemaVersion: 4;
+  schemaVersion: 5;
   exportedAt: string;
   integrity: { algorithm: "SHA-256"; digest: string };
   data: ProductBackupData;
@@ -177,14 +204,14 @@ function stopWorker(error: Error) {
 
 /**
  * Send a worker command and surface its result or failure to the caller.
- * Writes time out after 15 seconds so callers can retry with the same operation ID;
+ * Writes time out after 15 seconds so the caller can retry with its stable operation ID;
  * reads wait up to 60 seconds for OPFS initialization.
  * @param command - A supported setup, account, ledger, transaction, backup, or close command.
  * @param args - Command-specific values sent to the dedicated database worker.
  * @returns The typed command result; the promise rejects on worker errors or timeout.
  */
 export function database<T extends DatabaseResult = DatabaseResult>(
-  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "createIncome" | "exportBackup" | "restoreBackup" | "close",
+  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "createIncome" | "updateTransaction" | "deleteTransaction" | "exportBackup" | "restoreBackup" | "close",
   args: object = {},
 ): Promise<T> {
   if (!worker) {
@@ -201,7 +228,7 @@ export function database<T extends DatabaseResult = DatabaseResult>(
   }
   return new Promise((resolve, reject) => {
     const id = ++sequence;
-    const isWrite = command === "complete" || command === "createExpense" || command === "createIncome" || command === "restoreBackup" || command.startsWith("account.");
+    const isWrite = command === "complete" || command === "createExpense" || command === "createIncome" || command === "updateTransaction" || command === "deleteTransaction" || command === "restoreBackup" || command.startsWith("account.");
     const timer = setTimeout(
       () =>
         stopWorker(
@@ -213,6 +240,8 @@ export function database<T extends DatabaseResult = DatabaseResult>(
                   ? "Save confirmation timed out. Retry to check whether your income was saved."
                   : command === "restoreBackup"
                     ? "Restore confirmation timed out. Reopen your saved data before retrying the backup."
+                    : command === "updateTransaction" || command === "deleteTransaction"
+                      ? "Save confirmation timed out. Reopen transaction history before retrying this change."
                     : "Save confirmation timed out. Retry the account change to check whether it was saved."
               : "Opening local storage timed out. Retry to reopen existing storage.",
           ),
