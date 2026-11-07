@@ -169,6 +169,54 @@ resolution. Evidence is static and platform-specific. No runtime validation,
 native comparison, minimum historical date, or linked-effect rule beyond the
 eligible cashback path is claimed.
 
+### Ordinary income entry
+
+Checked 2026-11-07 from the shipped web `add-income` chunk, Metro module 2617,
+and common-bundle modules 1685, 1701, 1709, and 1730. The chunk is
+`add-income-c54847041456330b5c6bb44f04331180.js`, 75,087 bytes, with SHA-256
+`4ae172ffa99f05be1a4a840b8a9368b0f9154656eb686b4b7091aa7c95d5520e`. The cached
+index maps `./add-income.tsx` to this chunk. The route map, full direct module
+dependency list, source artifact, and REA 6.8.0 Evidence are retained in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-income-20261107/`; the REA
+Evidence ID is `ev_c54dd834bd8afceaee3b0e5fb9a5e6d8d0c875acbe3618f3b48a0991a4f0bac3`.
+This is a completed static parse of one file, with 22,839 AST nodes, 234
+findings, and no parse failures. It does not establish runtime behavior or
+iPhone 2.5.9 parity.
+
+The ordinary form starts with today's local date, no selected category, and the
+profile's preferred currency. It requires an account and a nonnegative amount.
+The amount must be positive for a current or past one-time entry. A future
+one-time date becomes planned, does not post to the balance, and permits a zero
+amount. A note is trimmed and omitted when blank. The category is optional; an
+unset category is stored without a category ID. The form's account picker
+includes Debit and Credit accounts. It converts from the selected currency to
+the account currency when they differ, using the app's available or manual
+conversion rate.
+
+The built-in income categories are Salary (`salary`), Bonus (`bonus`),
+Freelance (`freelance`), Commission (`commission`), Business (`business`),
+Side Hustle (`side-hustle`), Allowance (`allowance`), Gift (`gift`), Refund
+(`refund`), Cashback (`cashback`), Interest (`interest`), Dividend
+(`dividend`), Rental (`rental`), and Other (`other`). The source also filters
+hidden categories and supports custom categories; those paths are outside this
+bounded Kuwi entry.
+
+For an eligible ordinary income, the store posts only when the date is today or
+earlier and the income is not planned. The balance helper adds income to Debit
+and Asset balances and subtracts it from the amount owed on Credit accounts.
+The ordinary income form itself exposes Debit and Credit accounts. Its currency
+rounding helper uses the account currency: PHP 12.345 rounds to 12.35 and JPY
+12.5 rounds to 13. As a calculation example, PHP 1,000 plus a same-day income
+of 12.35 gives a Debit balance of 1,012.35; a Credit amount owed of 1,000
+becomes 987.65. The same entry dated tomorrow is planned and leaves either
+balance unchanged. These are calculations from the traced helpers, not
+observed runs of Tarsi.
+
+Kuwi's first income entry supports the selected account's currency. The source
+currency selector and cross-currency conversion flow need their own verified
+rate source and are not included. Recurring income, subcategories, custom or
+hidden categories, and native behavior are also outside this stage.
+
 Transfers reject nonpositive amounts, identical source/destination accounts,
 missing accounts, and failed eligibility checks. The action rounds source and
 received amounts in their respective currencies. A positive fee becomes a

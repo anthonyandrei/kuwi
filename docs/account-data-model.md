@@ -32,12 +32,14 @@ characters and limits the fractional part to the currency precision, matching
 the recovered formatter behavior.
 
 Positive starting balances become initial adjustment rows. A zero opening
-balance has no adjustment row. When an account has an adjustment or expense,
-its starting balance and currency cannot be changed in the account editor; the
-name remains editable. Credit limit changes remain editable. Expenses reduce
-Debit and Assets balances and increase the amount owed on Credit accounts. The
-balance and activity flag are derived from the referenced adjustment and
-expense records.
+balance has no adjustment row. When an account has an adjustment, expense, or
+income, its starting balance and currency cannot be changed in the account
+editor; the name remains editable. Credit limit changes remain editable.
+Expenses reduce Debit and Assets balances and increase the amount owed on Credit accounts. The
+balance and activity flag are derived from the referenced adjustment, expense,
+and posted income records. Income adds to Debit and Assets balances and reduces
+the amount owed on Credit accounts. Kuwi currently accepts income on Debit and
+Credit accounts; the recovered income form does not offer Assets accounts.
 
 ## Relations and dependencies
 
@@ -52,19 +54,24 @@ expense records.
 | `categories` | `id` | Canonical label and display order for built-in expense categories. |
 | `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, positive minor units, date, optional note, `created_at`. |
 | `pending_sync_operations` | `operation_id` | `operation_id` → `expenses.id`; marks an expense creation for local sync. |
+| `income_categories` | `id` | Canonical label and display order for built-in income categories. |
+| `incomes` | `id` | `account_id` → `accounts.id`, optional `category_id` → `income_categories.id`, nonnegative minor units, date, optional note, planned flag, `created_at`. |
+| `pending_income_sync_operations` | `operation_id` | `operation_id` → `incomes.id`; marks an income creation for local sync. |
 
 The non-key dependencies are `code → decimal_places`, `profile id → preferred
 name, preferred currency`, `account id → name, type, currency, credit limit,
 creation time`, `adjustment id → account id, amount, kind, creation time`,
 `operation id → account id, operation type, request fingerprint, creation
-time`, `category id → label, display order`, and `expense id → account,
-category, amount, date, note, creation time`. `setup.id` identifies one profile
-and its first account.
+time`, `category id → label, display order`, `expense id → account, category,
+amount, date, note, creation time`, and `income id → account, optional
+category, amount, date, note, planned state, creation time`. `setup.id`
+identifies one profile and its first account.
 
-Balances combine `account_adjustments` with posted expense effects; the app
-does not store another mutable balance on `accounts`. Account name and currency
-are stored once and referenced by ID from linked facts. Credit limits are
-account terms, while credit balances come from adjustment and expense facts.
+Balances combine `account_adjustments` with posted expense and income effects;
+the app does not store another mutable balance on `accounts`. Account name and
+currency are stored once and referenced by ID from linked facts. Credit limits
+are account terms, while credit balances come from adjustment and transaction
+facts.
 
 ## Write and retry contract
 
@@ -92,7 +99,12 @@ Version 3 adds categories, expenses, pending sync markers, and an account/date
 index. The expense migration runs in one transaction after the account
 migration and preserves version 2 data if it fails.
 
+Version 4 adds income categories, incomes, pending income sync markers, and an
+account/date index. It runs in one transaction after the expense migration.
+Failure leaves version 3 and its expense history intact. Existing account,
+expense, category, and setup IDs are preserved.
+
 The adjustment table currently accepts initial balances only. Manual balance
-adjustments, account deletion, loan schedules, investments, income, transfers,
-backup data, and cloud-sync delivery need their own verified rules and schema
-changes before implementation.
+adjustments, account deletion, loan schedules, investments, transfers, backup
+data, and cloud-sync delivery need their own verified rules and schema changes
+before implementation.

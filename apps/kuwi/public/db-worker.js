@@ -154,8 +154,50 @@ function migrateExpenses() {
 }
 
 /**
+ * Migrate v3 to v4 in one transaction, adding canonical income categories,
+ * income records, and pending sync markers without changing existing rows.
+ * @returns {void} The database is left at v4 after commit.
+ * @throws {Error} SQLite failures roll back the migration and retain v3 data.
+ */
+function migrateIncomes() {
+  transaction(() => {
+    db.exec(`
+      CREATE TABLE income_categories(
+        id TEXT PRIMARY KEY NOT NULL,
+        label TEXT NOT NULL,
+        sort_order INTEGER NOT NULL UNIQUE CHECK(sort_order>=0)
+      ) STRICT;
+      INSERT INTO income_categories VALUES
+        ('salary','Salary',0),('bonus','Bonus',1),('freelance','Freelance',2),
+        ('commission','Commission',3),('business','Business',4),
+        ('side-hustle','Side Hustle',5),('allowance','Allowance',6),
+        ('gift','Gift',7),('refund','Refund',8),('cashback','Cashback',9),
+        ('interest','Interest',10),('dividend','Dividend',11),
+        ('rental','Rental',12),('other','Other',13);
+      CREATE TABLE incomes(
+        id TEXT PRIMARY KEY NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        category_id TEXT REFERENCES income_categories(id),
+        amount_minor INTEGER NOT NULL CHECK(amount_minor>=0),
+        date TEXT NOT NULL CHECK(length(date)=10),
+        note TEXT,
+        planned INTEGER NOT NULL CHECK(planned IN (0,1)),
+        created_at TEXT NOT NULL,
+        CHECK(amount_minor>0 OR planned=1)
+      ) STRICT;
+      CREATE INDEX incomes_by_account_date
+        ON incomes(account_id, date DESC, created_at DESC);
+      CREATE TABLE pending_income_sync_operations(
+        operation_id TEXT PRIMARY KEY NOT NULL REFERENCES incomes(id)
+      ) STRICT;
+      PRAGMA user_version=4;
+    `);
+  });
+}
+
+/**
  * Own the OPFS database lock for the connection lifetime and initialize SQLite.
- * Fresh stores are upgraded through v3; stored v1 and v2 databases run each
+ * Fresh stores are upgraded through v4; stored v1, v2, and v3 databases run each
  * required migration before a command can read or write data. A failed step
  * leaves that step's starting schema and records available for a later retry.
  * @throws {Error} OPFS or Web Locks is unavailable, another tab owns the database,
@@ -187,11 +229,16 @@ async function open() {
           if (version === 0) {
             transaction(createSchema);
             migrateExpenses();
+            migrateIncomes();
           } else if (version === 1) {
             migrateV1();
             migrateExpenses();
-          } else if (version === 2) migrateExpenses();
-          else if (version !== 3)
+            migrateIncomes();
+          } else if (version === 2) {
+            migrateExpenses();
+            migrateIncomes();
+          } else if (version === 3) migrateIncomes();
+          else if (version !== 4)
             throw Error("Unsupported database version. Existing data has been preserved.");
           const lifetime = new Promise((done) => { release = done; });
           resolve();
@@ -209,9 +256,9 @@ async function open() {
 }
 
 /**
- * Read one account with its balance derived from adjustments and posted expenses.
- * Debit and asset expenses reduce the balance; credit expenses increase the amount owed.
- * `has_activity` is true when the account has an adjustment or any expense.
+ * Read one account with its balance derived from adjustments, expenses, and posted income.
+ * Expenses reduce Debit/Assets balances and increase Credit debt; income applies the reverse.
+ * `has_activity` is true when the account has an adjustment, expense, or income.
  * @param {string} accountId - Account primary key.
  * @returns {object|null} Account details with currency precision and balance, or null when missing.
  */
@@ -221,17 +268,20 @@ function account(accountId) {
       (SELECT COALESCE(SUM(j.amount_minor),0) FROM account_adjustments j WHERE j.account_id=a.id)
       + CASE WHEN a.type='credit'
           THEN (SELECT COALESCE(SUM(e.amount_minor),0) FROM expenses e WHERE e.account_id=a.id AND e.date<=?)
+             - (SELECT COALESCE(SUM(i.amount_minor),0) FROM incomes i WHERE i.account_id=a.id AND i.date<=? AND i.planned=0)
           ELSE -(SELECT COALESCE(SUM(e.amount_minor),0) FROM expenses e WHERE e.account_id=a.id AND e.date<=?)
+             + (SELECT COALESCE(SUM(i.amount_minor),0) FROM incomes i WHERE i.account_id=a.id AND i.date<=? AND i.planned=0)
         END AS balance_minor,
       (EXISTS(SELECT 1 FROM account_adjustments linked WHERE linked.account_id=a.id)
-        OR EXISTS(SELECT 1 FROM expenses linked WHERE linked.account_id=a.id)) AS has_activity
+        OR EXISTS(SELECT 1 FROM expenses linked WHERE linked.account_id=a.id)
+        OR EXISTS(SELECT 1 FROM incomes linked WHERE linked.account_id=a.id)) AS has_activity
      FROM accounts a JOIN currencies c ON c.code=a.currency_code WHERE a.id=?`,
-    [localDate(), localDate(), accountId],
+    [localDate(), localDate(), localDate(), localDate(), accountId],
   )[0] ?? null;
 }
 
 /**
- * List accounts in creation order with balances derived from adjustments and posted expenses.
+ * List accounts in creation order with balances derived from adjustments, expenses, and posted income.
  * @returns {Array<object>} Saved account details, currency precision, and derived balances.
  */
 function accountList() {
@@ -240,13 +290,16 @@ function accountList() {
       (SELECT COALESCE(SUM(j.amount_minor),0) FROM account_adjustments j WHERE j.account_id=a.id)
       + CASE WHEN a.type='credit'
           THEN (SELECT COALESCE(SUM(e.amount_minor),0) FROM expenses e WHERE e.account_id=a.id AND e.date<=?)
+             - (SELECT COALESCE(SUM(i.amount_minor),0) FROM incomes i WHERE i.account_id=a.id AND i.date<=? AND i.planned=0)
           ELSE -(SELECT COALESCE(SUM(e.amount_minor),0) FROM expenses e WHERE e.account_id=a.id AND e.date<=?)
+             + (SELECT COALESCE(SUM(i.amount_minor),0) FROM incomes i WHERE i.account_id=a.id AND i.date<=? AND i.planned=0)
         END AS balance_minor,
       (EXISTS(SELECT 1 FROM account_adjustments linked WHERE linked.account_id=a.id)
-        OR EXISTS(SELECT 1 FROM expenses linked WHERE linked.account_id=a.id)) AS has_activity
+        OR EXISTS(SELECT 1 FROM expenses linked WHERE linked.account_id=a.id)
+        OR EXISTS(SELECT 1 FROM incomes linked WHERE linked.account_id=a.id)) AS has_activity
      FROM accounts a JOIN currencies c ON c.code=a.currency_code
      ORDER BY a.created_at, a.id`,
-    [localDate(), localDate()],
+    [localDate(), localDate(), localDate(), localDate()],
   );
 }
 
@@ -280,7 +333,8 @@ function state() {
 
 const backupFormat = "kuwi.backup";
 const backupVersion = 1;
-const backupSchemaVersion = 3;
+const backupSchemaVersion = 4;
+const legacyBackupSchemaVersion = 3;
 const backupCurrencies = { EUR: 2, GBP: 2, JPY: 0, PHP: 2, TWD: 2, USD: 2 };
 const backupCategories = [
   ["food", "Food", 0],
@@ -292,6 +346,22 @@ const backupCategories = [
   ["health", "Health", 6],
   ["fees", "Fees", 7],
   ["other", "Other", 8],
+];
+const backupIncomeCategories = [
+  ["salary", "Salary", 0],
+  ["bonus", "Bonus", 1],
+  ["freelance", "Freelance", 2],
+  ["commission", "Commission", 3],
+  ["business", "Business", 4],
+  ["side-hustle", "Side Hustle", 5],
+  ["allowance", "Allowance", 6],
+  ["gift", "Gift", 7],
+  ["refund", "Refund", 8],
+  ["cashback", "Cashback", 9],
+  ["interest", "Interest", 10],
+  ["dividend", "Dividend", 11],
+  ["rental", "Rental", 12],
+  ["other", "Other", 13],
 ];
 
 /** Serialize JSON data with keys sorted recursively and array order retained.
@@ -315,7 +385,7 @@ async function backupDigest(body) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Snapshot every v3 source relation in deterministic order and attach its integrity digest.
+/** Snapshot every v4 source relation in deterministic order and attach its integrity digest.
  * @returns {Promise<object>} A complete v1/v3 Kuwi backup envelope.
  * @throws {Error} SQLite reads or Web Crypto digest generation fail.
  */
@@ -330,6 +400,9 @@ async function createBackup() {
     categories: rows("SELECT id, label, sort_order FROM categories ORDER BY sort_order, id"),
     expenses: rows("SELECT id, account_id, category_id, amount_minor, date, note, created_at FROM expenses ORDER BY id"),
     pendingSyncOperations: rows("SELECT operation_id FROM pending_sync_operations ORDER BY operation_id"),
+    incomeCategories: rows("SELECT id, label, sort_order FROM income_categories ORDER BY sort_order, id"),
+    incomes: rows("SELECT id, account_id, category_id, amount_minor, date, note, planned, created_at FROM incomes ORDER BY id"),
+    pendingIncomeSyncOperations: rows("SELECT operation_id FROM pending_income_sync_operations ORDER BY operation_id"),
   };
   const body = { format: backupFormat, version: backupVersion, schemaVersion: backupSchemaVersion, data };
   return {
@@ -350,7 +423,7 @@ function requireText(value, description) {
     throw Error(`Backup data constraints failed: ${description} must be nonempty text.`);
 }
 
-/** Ensure a relation contains only rows with the v3 contract's exact columns.
+/** Ensure a relation contains only rows with the backup contract's exact columns.
  * @param {object} data - Candidate backup data object.
  * @param {string} relation - Relation key in the backup.
  * @param {string[]} fields - Required row property names.
@@ -413,13 +486,14 @@ function requireTimestamp(value, description) {
 /** Validate the v1 envelope, supported definitions, row constraints, and references without changing live tables.
  * Expense dates must be valid calendar dates no later than the browser's local date.
  * @param {unknown} backup - Parsed candidate file contents.
- * @returns {Promise<object>} The candidate's validated v3 relation rows.
+ * @returns {Promise<object>} The candidate's validated v4 relation rows.
  * @throws {Error} The format, version, integrity digest, schema, constraints, or references fail.
  */
 async function validateBackup(backup) {
   if (!backup || typeof backup !== "object" || Array.isArray(backup) || backup.format !== backupFormat)
     throw Error("This file is not a Kuwi backup.");
-  if (backup.version !== backupVersion || backup.schemaVersion !== backupSchemaVersion)
+  if (backup.version !== backupVersion ||
+    ![legacyBackupSchemaVersion, backupSchemaVersion].includes(backup.schemaVersion))
     throw Error("This Kuwi backup uses an unsupported version.");
   const expectedEnvelopeKeys = ["data", "exportedAt", "format", "integrity", "schemaVersion", "version"];
   if (Object.keys(backup).sort().join("\0") !== expectedEnvelopeKeys.sort().join("\0"))
@@ -442,8 +516,11 @@ async function validateBackup(backup) {
     throw Error("Backup data constraints failed: exportedAt is invalid.");
 
   const data = backup.data;
+  const legacy = backup.schemaVersion === legacyBackupSchemaVersion;
+  const legacyRelations = ["accountAdjustments", "accounts", "categories", "currencies", "expenses", "pendingOperations", "pendingSyncOperations", "profiles", "setup"];
+  const currentRelations = [...legacyRelations, "incomeCategories", "incomes", "pendingIncomeSyncOperations"];
   if (!data || typeof data !== "object" || Array.isArray(data) ||
-    Object.keys(data).sort().join("\0") !== ["accountAdjustments", "accounts", "categories", "currencies", "expenses", "pendingOperations", "pendingSyncOperations", "profiles", "setup"].sort().join("\0"))
+    Object.keys(data).sort().join("\0") !== [...(legacy ? legacyRelations : currentRelations)].sort().join("\0"))
     throw Error("Backup data constraints failed: the data set is incomplete or unsupported.");
   const currencies = requireRows(data, "currencies", ["code", "decimal_places"]);
   const profiles = requireRows(data, "profiles", ["id", "preferred_name", "preferred_currency"]);
@@ -454,6 +531,15 @@ async function validateBackup(backup) {
   const categories = requireRows(data, "categories", ["id", "label", "sort_order"]);
   const expenses = requireRows(data, "expenses", ["id", "account_id", "category_id", "amount_minor", "date", "note", "created_at"]);
   const pendingSync = requireRows(data, "pendingSyncOperations", ["operation_id"]);
+  const incomeCategories = legacy
+    ? backupIncomeCategories.map(([id, label, sort_order]) => ({ id, label, sort_order }))
+    : requireRows(data, "incomeCategories", ["id", "label", "sort_order"]);
+  const incomes = legacy
+    ? []
+    : requireRows(data, "incomes", ["id", "account_id", "category_id", "amount_minor", "date", "note", "planned", "created_at"]);
+  const pendingIncomeSync = legacy
+    ? []
+    : requireRows(data, "pendingIncomeSyncOperations", ["operation_id"]);
 
   if (currencies.length !== Object.keys(backupCurrencies).length ||
     currencies.some(({ code, decimal_places }) => backupCurrencies[code] !== decimal_places))
@@ -461,6 +547,9 @@ async function validateBackup(backup) {
   if (categories.length !== backupCategories.length || categories.some((category, index) =>
     category.id !== backupCategories[index][0] || category.label !== backupCategories[index][1] || category.sort_order !== backupCategories[index][2]))
     throw Error("Backup data constraints failed: the category definitions are unsupported.");
+  if (incomeCategories.length !== backupIncomeCategories.length || incomeCategories.some((category, index) =>
+    category.id !== backupIncomeCategories[index][0] || category.label !== backupIncomeCategories[index][1] || category.sort_order !== backupIncomeCategories[index][2]))
+    throw Error("Backup data constraints failed: the income category definitions are unsupported.");
 
   requireUnique(currencies, "code", "currencies");
   const currencyCodes = new Set(currencies.map(({ code }) => code));
@@ -471,6 +560,9 @@ async function validateBackup(backup) {
   const categoryIds = requireUnique(categories, "id", "categories");
   const expenseIds = requireUnique(expenses, "id", "expenses");
   const pendingIds = requireUnique(pendingSync, "operation_id", "pendingSyncOperations");
+  const incomeCategoryIds = requireUnique(incomeCategories, "id", "incomeCategories");
+  const incomeIds = requireUnique(incomes, "id", "incomes");
+  const pendingIncomeIds = requireUnique(pendingIncomeSync, "operation_id", "pendingIncomeSyncOperations");
 
   if (profiles.length > 1 || (profiles.length === 1) !== (setupRows.length === 1) ||
     (setupRows.length === 1) !== (accounts.length > 0))
@@ -526,17 +618,41 @@ async function validateBackup(backup) {
   if (pendingIds.size !== expenseIds.size || [...pendingIds].some((id) => !expenseIds.has(id)))
     throw Error("Backup reference check failed: an expense is missing its pending sync operation.");
 
-  return data;
+  for (const income of incomes) {
+    const selectedAccount = accounts.find(({ id }) => id === income.account_id);
+    if (!selectedAccount || (income.category_id !== null && !incomeCategoryIds.has(income.category_id)))
+      throw Error("Backup reference check failed: an income refers to a missing account or category.");
+    if (!["debit", "credit"].includes(selectedAccount.type))
+      throw Error("Backup data constraints failed: income account type is unsupported.");
+    requireInteger(income.amount_minor, "incomes.amount_minor", { minimum: 0 });
+    if (!isValidDate(income.date) || (income.amount_minor === 0 && income.planned !== 1) ||
+      ![0, 1].includes(income.planned) || (income.date > localDate() && income.planned !== 1))
+      throw Error("Backup data constraints failed: an income amount, date, or planned flag is invalid.");
+    if (income.note !== null && typeof income.note !== "string")
+      throw Error("Backup data constraints failed: an income note is invalid.");
+    requireTimestamp(income.created_at, "incomes.created_at");
+  }
+  if (pendingIncomeIds.size !== incomeIds.size || [...pendingIncomeIds].some((id) => !incomeIds.has(id)))
+    throw Error("Backup reference check failed: an income is missing its pending sync operation.");
+
+  return {
+    ...data,
+    incomeCategories,
+    incomes,
+    pendingIncomeSyncOperations: pendingIncomeSync,
+  };
 }
 
-/** Replace v3 records atomically; callers must validate the candidate before calling.
- * @param {object} data - Complete v3 relations returned by `validateBackup`.
+/** Replace v4 records atomically; callers must validate the candidate before calling.
+ * @param {object} data - Complete v4 relations returned by `validateBackup`.
  * @returns {void} Resolves after SQLite commits the replacement.
  * @throws {Error} SQLite rejects a delete, insert, constraint, or commit.
  */
 function replaceBackupData(data) {
   transaction(() => {
     db.exec(`
+      DELETE FROM pending_income_sync_operations;
+      DELETE FROM incomes;
       DELETE FROM pending_sync_operations;
       DELETE FROM expenses;
       DELETE FROM pending_operations;
@@ -544,6 +660,7 @@ function replaceBackupData(data) {
       DELETE FROM setup;
       DELETE FROM accounts;
       DELETE FROM profiles;
+      DELETE FROM income_categories;
       DELETE FROM categories;
       DELETE FROM currencies;
     `);
@@ -559,12 +676,15 @@ function replaceBackupData(data) {
     insertRows("currencies", ["code", "decimal_places"], data.currencies);
     insertRows("profiles", ["id", "preferred_name", "preferred_currency"], data.profiles);
     insertRows("categories", ["id", "label", "sort_order"], data.categories);
+    insertRows("income_categories", ["id", "label", "sort_order"], data.incomeCategories);
     insertRows("accounts", ["id", "name", "type", "currency_code", "credit_limit_minor", "created_at"], data.accounts);
     insertRows("account_adjustments", ["id", "account_id", "amount_minor", "adjustment_type", "created_at"], data.accountAdjustments);
     insertRows("setup", ["id", "profile_id", "first_account_id", "completed_at"], data.setup);
     insertRows("pending_operations", ["id", "account_id", "operation_type", "request_fingerprint", "created_at"], data.pendingOperations);
     insertRows("expenses", ["id", "account_id", "category_id", "amount_minor", "date", "note", "created_at"], data.expenses);
     insertRows("pending_sync_operations", ["operation_id"], data.pendingSyncOperations);
+    insertRows("incomes", ["id", "account_id", "category_id", "amount_minor", "date", "note", "planned", "created_at"], data.incomes);
+    insertRows("pending_income_sync_operations", ["operation_id"], data.pendingIncomeSyncOperations);
   });
 }
 
@@ -580,7 +700,7 @@ async function restoreBackup(backup) {
 }
 
 /**
- * Return one account, built-in categories, and that account's expense history.
+ * Return one account, canonical categories, and its combined transaction history.
  * @param {string} [accountId] - Account ID; omitted to use the setup account.
  * @returns {object|null} The account ledger, or null when the requested account is unavailable.
  */
@@ -590,15 +710,24 @@ function readLedger(accountId) {
   if (!selectedAccount) return null;
   return {
     account: selectedAccount,
-    categories: rows("SELECT id, label FROM categories ORDER BY sort_order"),
-    expenses: rows(
-      `SELECT e.id, p.operation_id, e.account_id, e.category_id,
-        c.label AS category_label, e.amount_minor, e.date, e.note, e.created_at
+    expense_categories: rows("SELECT id, label FROM categories ORDER BY sort_order"),
+    income_categories: rows("SELECT id, label FROM income_categories ORDER BY sort_order"),
+    transactions: rows(
+      `SELECT 'expense' AS kind, e.id, e.account_id, e.category_id,
+        c.label AS category_label, e.amount_minor, e.date, e.note, e.created_at,
+        0 AS planned
        FROM expenses e JOIN categories c ON c.id=e.category_id
        JOIN pending_sync_operations p ON p.operation_id=e.id
        WHERE e.account_id=?
-       ORDER BY e.date DESC, e.created_at DESC, e.id DESC`,
-      [selectedAccount.id],
+      UNION ALL
+       SELECT 'income' AS kind, i.id, i.account_id, i.category_id,
+        c.label AS category_label, i.amount_minor, i.date, i.note, i.created_at,
+        i.planned
+       FROM incomes i LEFT JOIN income_categories c ON c.id=i.category_id
+       JOIN pending_income_sync_operations p ON p.operation_id=i.id
+       WHERE i.account_id=?
+       ORDER BY 7 DESC, 9 DESC, 2 DESC`,
+      [selectedAccount.id, selectedAccount.id],
     ),
   };
 }
@@ -676,6 +805,75 @@ function createExpense(args) {
     });
     db.exec({
       sql: "INSERT INTO pending_sync_operations(operation_id) VALUES(?)",
+      bind: [operationId],
+    });
+  });
+  return { ledger: readLedger(accountId), replayed };
+}
+
+/**
+ * Save one ordinary income and its pending sync marker atomically.
+ * The operation ID is also the income ID. Future dates are planned and do not
+ * affect the balance; only those entries may have a zero amount. Identical
+ * retries return the saved ledger, while changed content under the same ID fails.
+ * @param {object} args - Operation/account IDs, optional category, amount in minor units, date, and optional note.
+ * @returns {{ledger: object, replayed: boolean}} The refreshed ledger and whether this was a retry.
+ * @throws {Error} Invalid fields, unavailable references, a conflicting retry, or a failed database write.
+ */
+function createIncome(args) {
+  const operationId = typeof args.operationId === "string" ? args.operationId.trim() : "";
+  const accountId = args.accountId;
+  const categoryId = typeof args.categoryId === "string"
+    ? args.categoryId.trim() || null
+    : args.categoryId == null ? null : "";
+  const amountMinor = args.amountMinor;
+  const date = args.date;
+  const note = typeof args.note === "string" ? args.note.trim() || null : null;
+  if (!operationId || !Number.isSafeInteger(amountMinor) || amountMinor < 0)
+    throw Error("Enter a valid income amount.");
+  if (!isValidDate(date)) throw Error("Choose a valid income date.");
+  const planned = date > localDate();
+  if (amountMinor === 0 && !planned)
+    throw Error("Enter an income amount greater than zero.");
+  if (args.categoryId != null && typeof args.categoryId !== "string")
+    throw Error("Choose a valid income category.");
+  if (args.note != null && typeof args.note !== "string")
+    throw Error("Enter a valid income note.");
+
+  const selectedAccount = account(accountId);
+  if (!selectedAccount || !["debit", "credit"].includes(selectedAccount.type))
+    throw Error("Choose an available debit or credit account.");
+  if (categoryId && !rows("SELECT id FROM income_categories WHERE id=?", [categoryId])[0])
+    throw Error("Choose a valid income category.");
+
+  let replayed = false;
+  transaction(() => {
+    const existing = rows(
+      `SELECT i.account_id, i.category_id, i.amount_minor, i.date, i.note, i.planned
+       FROM incomes i JOIN pending_income_sync_operations p ON p.operation_id=i.id
+       WHERE p.operation_id=?`,
+      [operationId],
+    )[0];
+    if (existing) {
+      if (
+        existing.account_id !== accountId ||
+        existing.category_id !== categoryId ||
+        existing.amount_minor !== amountMinor ||
+        existing.date !== date ||
+        existing.note !== note ||
+        existing.planned !== Number(planned)
+      )
+        throw Error("This save retry contains different income details.");
+      replayed = true;
+      return;
+    }
+    const createdAt = new Date().toISOString();
+    db.exec({
+      sql: "INSERT INTO incomes(id, account_id, category_id, amount_minor, date, note, planned, created_at) VALUES(?,?,?,?,?,?,?,?)",
+      bind: [operationId, accountId, categoryId, amountMinor, date, note, Number(planned), createdAt],
+    });
+    db.exec({
+      sql: "INSERT INTO pending_income_sync_operations(operation_id) VALUES(?)",
       bind: [operationId],
     });
   });
@@ -852,9 +1050,10 @@ async function complete(args) {
   });
 }
 
-/** Run one queued storage command and post its result or error to the requesting page.
- * @param {object} message - Worker request with response ID, supported command, and optional args.
- * @returns {Promise<void>} Resolves after the response is posted; command failures are returned as errors.
+/**
+ * Run one queued storage command and post its result or error to the requesting page.
+ * @param {object} message - Worker request with a response ID and optional command arguments.
+ * @returns {Promise<void>} Resolves after the worker posts its response.
  */
 async function dispatch({ id, command, args = {} }) {
   try {
@@ -872,6 +1071,7 @@ async function dispatch({ id, command, args = {} }) {
     else if (command === "account.create") result = await createAccount(args);
     else if (command === "account.update") result = await updateAccount(args);
     else if (command === "createExpense") result = createExpense(args);
+    else if (command === "createIncome") result = createIncome(args);
     else if (command === "complete") result = await complete(args);
     else if (command === "exportBackup") result = await createBackup();
     else if (command === "restoreBackup") result = await restoreBackup(args.backup);

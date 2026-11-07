@@ -85,7 +85,7 @@ index bundle. Both CLI processes exited; no analysis remains running.
 
 ## Focused screen analysis
 
-The saved index references 137 distinct lazy JavaScript chunk paths. Three
+The saved index references 137 distinct lazy JavaScript chunk paths. Four
 selected public chunks were downloaded on 2026-11-07. Their URLs use
 `https://web.tarsi.cloud/_expo/static/js/web/` followed by these filenames:
 
@@ -94,17 +94,26 @@ selected public chunks were downloaded on 2026-11-07. Their URLs use
 | `onboarding-944f3e42d4eac0c46f2f98b079a572a8.js` | 120361 | `5f27df8d8c7bdd9416605f5f85b1e8108fdee4802a7dfc2e38348b137fe3cdee` |
 | `add-expense-940caf825558b98d213bfca3fef5e6bd.js` | 141132 | `98677be132d94743c935cf788959c44ff21ffe3829226355dc21f7cdbdeb0c83` |
 | `wallet-5dbe5e8175165ef23d1cf3e6371beaff.js` | 147695 | `526d5e4fee2dbbcd5b287bab7acb4d66e8b5ee5f41f300e9328594102d3a43cd` |
+| `add-income-c54847041456330b5c6bb44f04331180.js` | 75087 | `4ae172ffa99f05be1a4a840b8a9368b0f9154656eb686b4b7091aa7c95d5520e` |
 
-The files and `provenance.json` are in
-`/Users/drei/Library/Caches/kuwi-research/tarsi-web-lazy-20261107/`.
-This selection avoids repeating the timed-out shared-bundle passes.
+The onboarding, expense, and wallet files and `provenance.json` are in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-web-lazy-20261107/`. The income
+chunk and its route/dependency map are in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-income-20261107/`. The cached
+index maps `./add-income.tsx` to the income chunk. Its Metro factory is module
+2617 and lists 70 direct dependency IDs. The traced common-bundle dependencies
+are 1685 (store), 1701 (currency helpers), 1709 (account balance delta), and
+1730 (income categories). The full dependency list is in the income
+`provenance.json`. This selection avoids repeating the timed-out shared-bundle
+passes.
 
-Both focused REA passes completed under the updated default Node runtime:
+Three focused REA passes completed under the updated default Node runtime:
 
 | Scope | Retained source Evidence | Completed coverage |
 | --- | --- | --- |
 | Onboarding | `ev_6554c66a64731577bca22e68086db816fc6a6880de20a463390a51d930dcc78e` | One parsed file, 34000 AST nodes, 68 findings, zero parse failures |
 | Expense entry and wallet | `ev_5c044eb54f9b31e6d257f18605f0585bff9b44e1e0040fe9a748b480432528fc` | Two parsed files, 84907 AST nodes, 458 findings, zero parse failures |
+| Income entry | `ev_c54dd834bd8afceaee3b0e5fb9a5e6d8d0c875acbe3618f3b48a0991a4f0bac3` | One parsed file, 22839 AST nodes, 234 findings, zero parse failures |
 
 The selected files have complete syntax parses. Both application and semantic
 graphs remain partial. Each pass capped semantic nodes and semantic unknowns
@@ -119,6 +128,7 @@ The Evidence bundles and summary views are saved outside the repository:
 - `/Users/drei/Library/Caches/kuwi-research/tarsi-onboarding-summary-20261107.json`
 - `/Users/drei/Library/Caches/kuwi-research/tarsi-entry-wallet-evidence-20261107.json`
 - `/Users/drei/Library/Caches/kuwi-research/tarsi-entry-wallet-summary-20261107.json`
+- `/Users/drei/Library/Caches/kuwi-research/tarsi-income-20261107/income-evidence.json`
 
 Direct Babel AST inspection separately followed literal Metro module references
 into the original common and index files. It recovered inert module wrappers

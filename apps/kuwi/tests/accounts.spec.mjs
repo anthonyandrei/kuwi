@@ -289,6 +289,13 @@ test("accounts use supported currencies and keep a credit limit separate from ow
   await page.getByLabel("Opening balance (USD)").fill("10.50");
   await page.getByRole("button", { name: "Save account" }).click();
   await expect(page.getByText(/(?:US)?\$10\.50/)).toBeVisible();
+  await page
+    .getByRole("button", { name: "View account Travel fund", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Add income", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
   await page.getByRole("button", { name: "Add account" }).click();
   await page.getByLabel("Account name").fill("Everyday card");
