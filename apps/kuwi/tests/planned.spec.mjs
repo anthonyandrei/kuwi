@@ -43,15 +43,43 @@ INSERT INTO pending_transaction_operations VALUES(
 );
 DROP TABLE pending_transaction_operations_v7;
 PRAGMA user_version=8;`;
+const populatedV9 = `${populatedV8Currency.replace("PRAGMA user_version=8;", "")}
+ALTER TABLE expenses ADD COLUMN planned INTEGER NOT NULL DEFAULT 0 CHECK(planned IN (0,1));
+ALTER TABLE expenses ADD COLUMN planned_amount_minor INTEGER CHECK(planned_amount_minor IS NULL OR planned_amount_minor>=0);
+ALTER TABLE incomes ADD COLUMN planned_amount_minor INTEGER CHECK(planned_amount_minor IS NULL OR planned_amount_minor>=0);
+ALTER TABLE pending_transaction_operations RENAME TO pending_transaction_operations_v8;
+CREATE TABLE pending_transaction_operations(
+  operation_id TEXT PRIMARY KEY NOT NULL,
+  transaction_kind TEXT NOT NULL CHECK(transaction_kind IN ('expense','income')),
+  transaction_id TEXT NOT NULL,
+  operation_type TEXT NOT NULL CHECK(operation_type IN ('edit','delete','log')),
+  request_fingerprint TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
+INSERT INTO pending_transaction_operations SELECT * FROM pending_transaction_operations_v8;
+INSERT INTO pending_transaction_operations VALUES(
+  'legacy-expense-log','expense','legacy-expense','log',
+  'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+  '2026-11-05T08:00:00.000Z'
+);
+DROP TABLE pending_transaction_operations_v8;
+PRAGMA user_version=9;`;
 
 const test = base.extend({
   storageFault: async ({}, provide) => {
     await provide({
       today: null,
       failExpenseSave: false,
+      failIncomeSave: false,
+      loseExpenseReply: false,
+      loseIncomeReply: false,
+      changeExpenseRetryIntent: false,
+      changeIncomeRetryIntent: false,
       failLog: false,
       loseLogReply: false,
       upgradeV7: false,
+      upgradeV9: false,
+      failMigrationV10: false,
       failMigration: false,
       upgradeV8Layout: null,
     });
@@ -71,12 +99,14 @@ __kuwiTestClock.onmessage = ({ data }) => {
   }
 };
 ${dateHelper.replace("function localDate() {", "function localDate() {\n  if (__kuwiTestToday) return __kuwiTestToday;")}`);
-      if (storageFault.upgradeV7 || storageFault.upgradeV8Layout) {
-        const fixture = storageFault.upgradeV8Layout === "currency" ? populatedV8Currency
+      if (storageFault.upgradeV7 || storageFault.upgradeV8Layout || storageFault.upgradeV9) {
+        const fixture = storageFault.upgradeV9 ? populatedV9
+          : storageFault.upgradeV8Layout === "currency" ? populatedV8Currency
           : storageFault.upgradeV8Layout === "planned" ? populatedV8Planned
             : populatedV7;
         storageFault.upgradeV7 = false;
         storageFault.upgradeV8Layout = null;
+        storageFault.upgradeV9 = false;
         source = source.replace(
           'const version = db.selectValue("PRAGMA user_version");',
           `const originalVersion=db.selectValue("PRAGMA user_version"); if(originalVersion===0){db.exec(${JSON.stringify(fixture)});} const version = db.selectValue("PRAGMA user_version");`,
@@ -89,22 +119,54 @@ ${dateHelper.replace("function localDate() {", "function localDate() {\n  if (__
           '    db.exec("PRAGMA user_version=9"); if(!self.__v9MigrationFailed){self.__v9MigrationFailed=true;throw Error("Simulated v9 migration failure");}',
         );
       }
+      if (storageFault.failMigrationV10) {
+        storageFault.failMigrationV10 = false;
+        source = source.replace(
+          '    db.exec("PRAGMA user_version=10");',
+          '    db.exec("PRAGMA user_version=10"); if(!self.__v10MigrationFailed){self.__v10MigrationFailed=true;throw Error("Simulated v10 migration failure");}',
+        );
+      }
       if (storageFault.failExpenseSave) {
         storageFault.failExpenseSave = false;
         source = source.replace(
           `    db.exec({
-      sql: "INSERT INTO expenses(id, account_id, category_id, amount_minor, date, note, created_at, planned, planned_amount_minor) VALUES(?,?,?,?,?,?,?,?,NULL)",
-      bind: [operationId, accountId, categoryId, amountMinor, date, note, createdAt, Number(planned)],
-    });
+      sql: "INSERT INTO pending_sync_operations(operation_id, request_fingerprint) VALUES(?,?)",`,
+          `    if (!self.__plannedExpenseSaveFailed) { self.__plannedExpenseSaveFailed = true; throw Error("Simulated planned expense save failure"); }
     db.exec({
-      sql: "INSERT INTO pending_sync_operations(operation_id) VALUES(?)",`,
+      sql: "INSERT INTO pending_sync_operations(operation_id, request_fingerprint) VALUES(?,?)",`,
+        );
+      }
+      if (storageFault.failIncomeSave) {
+        storageFault.failIncomeSave = false;
+        source = source.replace(
           `    db.exec({
-      sql: "INSERT INTO expenses(id, account_id, category_id, amount_minor, date, note, created_at, planned, planned_amount_minor) VALUES(?,?,?,?,?,?,?,?,NULL)",
-      bind: [operationId, accountId, categoryId, amountMinor, date, note, createdAt, Number(planned)],
-    });
-    if (!self.__plannedExpenseSaveFailed) { self.__plannedExpenseSaveFailed = true; throw Error("Simulated planned expense save failure"); }
+      sql: "INSERT INTO pending_income_sync_operations(operation_id, request_fingerprint) VALUES(?,?)",`,
+          `    if (!self.__plannedIncomeSaveFailed) { self.__plannedIncomeSaveFailed = true; throw Error("Simulated planned income save failure"); }
     db.exec({
-      sql: "INSERT INTO pending_sync_operations(operation_id) VALUES(?)",`,
+      sql: "INSERT INTO pending_income_sync_operations(operation_id, request_fingerprint) VALUES(?,?)",`,
+        );
+      }
+      if (storageFault.loseExpenseReply || storageFault.loseIncomeReply) {
+        const kind = storageFault.loseExpenseReply ? "expense" : "income";
+        storageFault.loseExpenseReply = false;
+        storageFault.loseIncomeReply = false;
+        source = source.replace(
+          "    self.postMessage({ id, result });",
+          `    if (command === "create${kind === "expense" ? "Expense" : "Income"}" && !self.__planned${kind}ReplyDropped) { self.__planned${kind}ReplyDropped = true; self.postMessage({ id, error: "Simulated lost planned ${kind} reply" }); } else self.postMessage({ id, result });`,
+        );
+      }
+      if (storageFault.changeExpenseRetryIntent) {
+        storageFault.changeExpenseRetryIntent = false;
+        source = source.replace(
+          "function createExpense(args) {",
+          'function createExpense(args) { self.__createExpenseAttempt = (self.__createExpenseAttempt || 0) + 1; args.planned = self.__createExpenseAttempt === 1; ',
+        );
+      }
+      if (storageFault.changeIncomeRetryIntent) {
+        storageFault.changeIncomeRetryIntent = false;
+        source = source.replace(
+          "function createIncome(args) {",
+          'function createIncome(args) { self.__createIncomeAttempt = (self.__createIncomeAttempt || 0) + 1; args.planned = self.__createIncomeAttempt === 1; ',
         );
       }
       if (storageFault.failLog) {
@@ -266,7 +328,13 @@ test("future entries remain planned across offline reopening and log on explicit
   const download = await downloadPromise;
   const { readFile } = await import("node:fs/promises");
   const exported = JSON.parse(await readFile(await download.path(), "utf8"));
-  expect(exported.schemaVersion).toBe(9);
+  expect(exported.schemaVersion).toBe(10);
+  const plannedExpense = exported.data.expenses.find(({ note }) => note === "Planned rent");
+  const plannedIncome = exported.data.incomes.find(({ note }) => note === "Planned pay");
+  expect(JSON.parse(exported.data.pendingSyncOperations.find(({ operation_id }) => operation_id === plannedExpense.id).request_fingerprint))
+    .toMatchObject({ amountMinor: 12500, planned: true });
+  expect(JSON.parse(exported.data.pendingIncomeSyncOperations.find(({ operation_id }) => operation_id === plannedIncome.id).request_fingerprint))
+    .toMatchObject({ amountMinor: 15000, planned: true });
   expect(exported.data.expenses).toContainEqual(expect.objectContaining({
     note: "Planned rent", amount_minor: 12500, date: "2026-11-08", planned: 0, planned_amount_minor: 12500,
   }));
@@ -331,6 +399,147 @@ test("a future expense retry after its due date keeps the original planned inten
   await expect(page.getByText("Retry across due date", { exact: true })).toBeVisible();
   await expect(page.getByText("Planned", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "Log Retry across due date", exact: true })).toBeVisible();
+});
+
+test("a committed create retry keeps planned intent after its due date", async ({
+  context,
+  storageFault,
+}) => {
+  storageFault.today = "2026-11-07";
+  storageFault.loseExpenseReply = true;
+  const page = await context.newPage();
+  await finishSetup(page);
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("40");
+  await page.getByLabel("Expense date", { exact: true }).fill("2026-11-08");
+  await page.getByLabel("Expense note", { exact: true }).fill("Committed plan retry");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated lost planned expense reply");
+
+  await page.clock.fastForward(24 * 60 * 60 * 1000);
+  await setWorkerDate(page, "2026-11-08");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Log Committed plan retry", exact: true })).toBeVisible();
+});
+
+test("a create retry after logging replays its original planned request", async ({
+  context,
+  storageFault,
+}) => {
+  storageFault.today = "2026-11-07";
+  storageFault.loseExpenseReply = true;
+  const page = await context.newPage();
+  await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", {
+    configurable: true,
+    value: () => "planned-retry-after-log",
+  }));
+  await finishSetup(page);
+  await setDate(page, "2026-11-07");
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("40");
+  await page.getByLabel("Expense date", { exact: true }).fill("2026-11-08");
+  await page.getByLabel("Expense note", { exact: true }).fill("Retry after log");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated lost planned expense reply");
+
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await page.clock.fastForward(24 * 60 * 60 * 1000);
+  await setWorkerDate(page, "2026-11-08");
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await page.getByRole("button", { name: "Log Retry after log", exact: true }).click();
+  await page.getByRole("button", { name: "Confirm log expense", exact: true }).click();
+  await expect(page.getByText("₱960.00", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("40");
+  await page.getByLabel("Expense date", { exact: true }).fill("2026-11-08");
+  await page.getByLabel("Expense note", { exact: true }).fill("Retry after log");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText("₱960.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Retry after log", { exact: true })).toHaveCount(1);
+});
+
+test("expense create rejects a changed planned intent under the same ID", async ({ context, storageFault }) => {
+  storageFault.today = "2026-11-07";
+  storageFault.loseExpenseReply = true;
+  storageFault.changeExpenseRetryIntent = true;
+  const page = await context.newPage();
+  await finishSetup(page);
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("40");
+  await page.getByLabel("Expense date", { exact: true }).fill("2026-11-07");
+  await page.getByLabel("Expense note", { exact: true }).fill("Changed plan intent");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated lost planned expense reply");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("different expense details");
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+});
+
+test("income create rejects a changed planned intent under the same ID", async ({ context, storageFault }) => {
+  storageFault.today = "2026-11-07";
+  storageFault.loseIncomeReply = true;
+  storageFault.changeIncomeRetryIntent = true;
+  const page = await context.newPage();
+  await finishSetup(page);
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("40");
+  await page.getByLabel("Income date", { exact: true }).fill("2026-11-07");
+  await page.getByLabel("Income note", { exact: true }).fill("Changed income intent");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated lost planned income reply");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("different income details");
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+});
+
+test("an income create retry keeps the original planned intent across its due date", async ({
+  context,
+  storageFault,
+}) => {
+  storageFault.today = "2026-11-07";
+  storageFault.loseIncomeReply = true;
+  const page = await context.newPage();
+  await finishSetup(page);
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("40");
+  await page.getByLabel("Income date", { exact: true }).fill("2026-11-08");
+  await page.getByLabel("Income note", { exact: true }).fill("Income retry plan");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated lost planned income reply");
+  await page.clock.fastForward(24 * 60 * 60 * 1000);
+  await setWorkerDate(page, "2026-11-08");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Log Income retry plan", exact: true })).toBeVisible();
+});
+
+test("income create write failure rolls back its row and sync marker", async ({ page, storageFault }) => {
+  storageFault.today = "2026-11-07";
+  storageFault.failIncomeSave = true;
+  await finishSetup(page);
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("40");
+  await page.getByLabel("Income date", { exact: true }).fill("2026-11-08");
+  await page.getByLabel("Income note", { exact: true }).fill("Rolled back income");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated planned income save failure");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Rolled back income", { exact: true })).toHaveCount(1);
 });
 
 test("a planned entry stays unposted when reopened on its due date and after an ordinary edit", async ({
@@ -399,7 +608,7 @@ test("a populated v7 database migrates to planned transactions with receipts int
   const download = await downloadPromise;
   const { readFile } = await import("node:fs/promises");
   const backup = JSON.parse(await readFile(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(9);
+  expect(backup.schemaVersion).toBe(10);
   expect(backup.data.expenses).toEqual([
     expect.objectContaining({ id: "legacy-expense", planned: 0, planned_amount_minor: null }),
   ]);
@@ -426,7 +635,7 @@ test("a populated currency-aware v8 store keeps transfer amounts and canonical r
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export backup", exact: true }).click();
   const backup = JSON.parse(await readFile(await (await downloadPromise).path(), "utf8"));
-  expect(backup.schemaVersion).toBe(9);
+  expect(backup.schemaVersion).toBe(10);
   expect(backup.data.transfers).toEqual([
     expect.objectContaining({
       id: "legacy-fx",
@@ -455,7 +664,7 @@ test("a populated planned v8 store gains currency columns without losing planned
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "Export backup", exact: true }).click();
   const backup = JSON.parse(await readFile(await (await downloadPromise).path(), "utf8"));
-  expect(backup.schemaVersion).toBe(9);
+  expect(backup.schemaVersion).toBe(10);
   expect(backup.data.expenses).toEqual([
     expect.objectContaining({ id: "legacy-expense", planned: 1, planned_amount_minor: 1200 }),
   ]);
@@ -486,6 +695,34 @@ test("a failed v9 migration retains the populated v7 database for a later retry"
   await page.getByRole("button", { name: "Transaction history", exact: true }).click();
   await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
   await expect(page.getByText("Legacy pay", { exact: true })).toBeVisible();
+});
+
+test("a failed v10 migration preserves populated v9 finance data for a later retry", async ({ page, storageFault }) => {
+  storageFault.upgradeV9 = true;
+  storageFault.failMigrationV10 = true;
+  await page.goto("/");
+  await expect(page.getByRole("alert")).toContainText("Simulated v10 migration failure");
+  await page.reload();
+  await expect(page.getByText("₱908.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export backup", exact: true }).click();
+  const backup = JSON.parse(await readFile(await (await downloadPromise).path(), "utf8"));
+  expect(backup.schemaVersion).toBe(10);
+  expect(backup.data.profiles[0].monthly_cycle_start_day).toBe(1);
+  expect(backup.data.expenses.map(({ id }) => id)).toContain("legacy-expense");
+  expect(backup.data.incomes.map(({ id }) => id)).toContain("legacy-income");
+  expect(backup.data.pendingSyncOperations.find(({ operation_id }) => operation_id === "legacy-expense").request_fingerprint).toBeNull();
+  expect(backup.data.pendingIncomeSyncOperations.find(({ operation_id }) => operation_id === "legacy-income").request_fingerprint).toBeNull();
+  expect(backup.data.pendingTransactionOperations).toContainEqual(expect.objectContaining({
+    operation_id: "legacy-expense-log",
+    operation_type: "log",
+    transaction_id: "legacy-expense",
+  }));
 });
 
 test("planned expense and income edits keep balances exact through due dates and deletion", async ({

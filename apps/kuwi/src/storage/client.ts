@@ -89,6 +89,7 @@ export type BudgetRecord = BudgetProgress & {
 };
 export type BudgetState = {
   preferredCurrency: string | null;
+  monthlyCycleStartDay: number;
   categories: ExpenseCategory[];
   budgets: BudgetRecord[];
   summary: BudgetSummary | null;
@@ -167,6 +168,7 @@ export type BackupProfile = {
   id: string;
   preferred_name: string;
   preferred_currency: string;
+  monthly_cycle_start_day: number;
 };
 export type BackupAccount = {
   id: string;
@@ -221,7 +223,7 @@ export type BackupTransfer = {
   note: string | null;
   created_at: string;
 };
-export type BackupPendingSyncOperation = { operation_id: string };
+export type BackupPendingSyncOperation = { operation_id: string; request_fingerprint: string | null };
 export type BackupPendingTransferOperation = { operation_id: string; request_fingerprint: string };
 export type BackupIncomeCategory = { id: string; label: string; sort_order: number };
 export type BackupIncome = {
@@ -235,7 +237,7 @@ export type BackupIncome = {
   planned_amount_minor: number | null;
   created_at: string;
 };
-export type BackupPendingIncomeSyncOperation = { operation_id: string };
+export type BackupPendingIncomeSyncOperation = { operation_id: string; request_fingerprint: string | null };
 export type BackupPendingTransactionOperation = {
   operation_id: string;
   transaction_kind: TransactionRecord["kind"];
@@ -284,7 +286,7 @@ export type ProductBackupData = {
 export type ProductBackup = {
   format: "kuwi.backup";
   version: 1;
-  schemaVersion: 9;
+  schemaVersion: 10;
   exportedAt: string;
   integrity: { algorithm: "SHA-256"; digest: string };
   data: ProductBackupData;
@@ -316,6 +318,7 @@ type DatabaseCommand =
   | "deleteTransaction"
   | "budgetState"
   | "saveBudget"
+  | "saveMonthlyCycleStartDay"
   | "exportBackup"
   | "restoreBackup"
   | "close";
@@ -329,6 +332,7 @@ const writeTimeoutMessages: Partial<Record<DatabaseCommand, string>> = {
   updateTransaction: "Save confirmation timed out. Reopen transaction history before retrying this change.",
   deleteTransaction: "Save confirmation timed out. Reopen transaction history before retrying this change.",
   saveBudget: "Save confirmation timed out. Retry the budget change to check whether it was saved.",
+  saveMonthlyCycleStartDay: "Saving the monthly cycle setting timed out. Retry to check whether it was saved.",
   restoreBackup: "Restore confirmation timed out. Reopen your saved data before retrying the backup.",
 };
 
@@ -383,7 +387,7 @@ export function database<T extends DatabaseResult = DatabaseResult>(
   }
   return new Promise((resolve, reject) => {
     const id = ++sequence;
-    const isWrite = command === "complete" || command === "createExpense" || command === "createIncome" || command === "createTransfer" || command === "updateTransaction" || command === "deleteTransaction" || command === "saveBudget" || command === "restoreBackup" || command.startsWith("account.");
+    const isWrite = command === "complete" || command === "createExpense" || command === "createIncome" || command === "createTransfer" || command === "updateTransaction" || command === "deleteTransaction" || command === "saveBudget" || command === "saveMonthlyCycleStartDay" || command === "restoreBackup" || command.startsWith("account.");
     const timer = setTimeout(
       () =>
         stopWorker(

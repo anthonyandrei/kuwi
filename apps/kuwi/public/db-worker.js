@@ -36,7 +36,7 @@ function createSchema() {
   db.exec(`
     CREATE TABLE currencies(code TEXT PRIMARY KEY NOT NULL, decimal_places INTEGER NOT NULL CHECK(decimal_places BETWEEN 0 AND 3)) STRICT;
     INSERT INTO currencies VALUES('PHP',2),('USD',2),('EUR',2),('GBP',2),('JPY',0),('TWD',2);
-    CREATE TABLE profiles(id TEXT PRIMARY KEY NOT NULL, preferred_name TEXT NOT NULL CHECK(length(trim(preferred_name))>0), preferred_currency TEXT NOT NULL REFERENCES currencies(code)) STRICT;
+    CREATE TABLE profiles(id TEXT PRIMARY KEY NOT NULL, preferred_name TEXT NOT NULL CHECK(length(trim(preferred_name))>0), preferred_currency TEXT NOT NULL REFERENCES currencies(code), monthly_cycle_start_day INTEGER NOT NULL DEFAULT 1 CHECK(monthly_cycle_start_day BETWEEN 1 AND 31)) STRICT;
     CREATE TABLE accounts(
       id TEXT PRIMARY KEY NOT NULL,
       name TEXT NOT NULL CHECK(length(trim(name))>0),
@@ -147,7 +147,8 @@ function migrateExpenses() {
       CREATE INDEX expenses_by_account_date
         ON expenses(account_id, date DESC, created_at DESC);
       CREATE TABLE pending_sync_operations(
-        operation_id TEXT PRIMARY KEY NOT NULL REFERENCES expenses(id)
+        operation_id TEXT PRIMARY KEY NOT NULL REFERENCES expenses(id),
+        request_fingerprint TEXT
       ) STRICT;
       PRAGMA user_version=3;
     `);
@@ -188,7 +189,8 @@ function migrateIncomes() {
       CREATE INDEX incomes_by_account_date
         ON incomes(account_id, date DESC, created_at DESC);
       CREATE TABLE pending_income_sync_operations(
-        operation_id TEXT PRIMARY KEY NOT NULL REFERENCES incomes(id)
+        operation_id TEXT PRIMARY KEY NOT NULL REFERENCES incomes(id),
+        request_fingerprint TEXT
       ) STRICT;
       PRAGMA user_version=4;
     `);
@@ -350,9 +352,27 @@ function migratePlannedTransactions() {
   });
 }
 
+/** Add durable create receipts and the monthly budget cycle preference.
+ * @returns {void} Leaves the database at schema version 10 after commit.
+ * @throws {Error} SQLite rejects a column or version update; the migration rolls back.
+ */
+function migrateFinalReviewStorage() {
+  transaction(() => {
+    const profileColumns = rows("PRAGMA table_info(profiles)").map(({ name }) => name);
+    if (!profileColumns.includes("monthly_cycle_start_day"))
+      db.exec("ALTER TABLE profiles ADD COLUMN monthly_cycle_start_day INTEGER NOT NULL DEFAULT 1 CHECK(monthly_cycle_start_day BETWEEN 1 AND 31)");
+    for (const table of ["pending_sync_operations", "pending_income_sync_operations"]) {
+      const columns = rows(`PRAGMA table_info(${table})`).map(({ name }) => name);
+      if (!columns.includes("request_fingerprint"))
+        db.exec(`ALTER TABLE ${table} ADD COLUMN request_fingerprint TEXT`);
+    }
+    db.exec("PRAGMA user_version=10");
+  });
+}
+
 /**
  * Own the OPFS database lock for the connection lifetime and initialize SQLite.
- * Fresh stores are upgraded through v9. The final migration reconciles the
+ * Fresh stores are upgraded through v10. Migrations reconcile the
  * two populated v8 layouts before enabling reads and writes. A failed step
  * leaves its starting schema and records available for a later retry.
  * @returns {Promise<void>} Resolves after SQLite opens and migrations finish;
@@ -427,9 +447,10 @@ async function open() {
           } else if (version === 7) {
             migrateTransferCurrencies();
             migrateBudgets();
-          } else if (version !== 8 && version !== 9)
+          } else if (version !== 8 && version !== 9 && version !== 10)
             throw Error("Unsupported database version. Existing data has been preserved.");
           if (db.selectValue("PRAGMA user_version") === 8) migratePlannedTransactions();
+          if (db.selectValue("PRAGMA user_version") === 9) migrateFinalReviewStorage();
           const lifetime = new Promise((done) => { release = done; });
           resolve();
           await lifetime;
@@ -531,13 +552,13 @@ function state() {
 }
 
 /** Read category budget definitions and derive current progress from expense and income rows.
- * @returns {object} Preferred currency, expense categories, per-budget progress, and aggregate summary; empty before setup.
+ * @returns {object} Preferred currency, monthly cycle day, expense categories, per-budget progress, and aggregate summary; empty before setup.
  * Cross-currency totals are marked unavailable because this store has no FX quote source.
  * @throws {Error} A ledger query or budget calculation fails.
  */
 function budgetState() {
-  const profile = rows("SELECT preferred_currency FROM profiles WHERE id=(SELECT profile_id FROM setup WHERE id=1)")[0];
-  if (!profile) return { preferredCurrency: null, categories: [], budgets: [], summary: null };
+  const profile = rows("SELECT preferred_currency, monthly_cycle_start_day FROM profiles WHERE id=(SELECT profile_id FROM setup WHERE id=1)")[0];
+  if (!profile) return { preferredCurrency: null, monthlyCycleStartDay: 1, categories: [], budgets: [], summary: null };
   const accounts = accountList();
   const expenses = rows("SELECT account_id, category_id, amount_minor, date FROM expenses WHERE planned=0");
   const incomes = rows("SELECT account_id, amount_minor, date, planned FROM incomes");
@@ -550,6 +571,7 @@ function budgetState() {
       ...calculateBudgetProgress({
         budget,
         preferredCurrency: profile.preferred_currency,
+        monthlyCycleStartDay: profile.monthly_cycle_start_day,
         today: localDate(),
         accounts,
         expenses,
@@ -577,10 +599,28 @@ function budgetState() {
       };
   return {
     preferredCurrency: profile.preferred_currency,
+    monthlyCycleStartDay: profile.monthly_cycle_start_day,
     categories: rows("SELECT id, label FROM categories ORDER BY sort_order"),
     budgets,
     summary,
   };
+}
+
+/** Save the profile's preferred monthly budget boundary.
+ * @param {{day: number}} args - Calendar day from 1 through 31; short months clamp it.
+ * @returns {object} Refreshed budget definitions and progress.
+ * @throws {Error} The day is outside the supported range or no profile exists.
+ */
+function saveMonthlyCycleStartDay(args) {
+  const day = args.day;
+  if (!Number.isSafeInteger(day) || day < 1 || day > 31)
+    throw Error("Choose a monthly cycle start day from 1 to 31.");
+  const profileId = rows("SELECT profile_id FROM setup WHERE id=1")[0]?.profile_id;
+  if (!profileId) throw Error("Complete setup before changing budget preferences.");
+  transaction(() => {
+    db.exec({ sql: "UPDATE profiles SET monthly_cycle_start_day=? WHERE id=?", bind: [day, profileId] });
+  });
+  return budgetState();
 }
 
 /** Validate and persist one category budget or zero-clear with an atomic retry receipt.
@@ -673,7 +713,7 @@ async function saveBudget(args) {
 
 const backupFormat = "kuwi.backup";
 const backupVersion = 1;
-const backupSchemaVersion = 9;
+const backupSchemaVersion = 10;
 const legacyBackupSchemaVersion = 3;
 const previousBackupSchemaVersion = 4;
 const transactionBackupSchemaVersion = 5;
@@ -729,13 +769,13 @@ async function backupDigest(body) {
 }
 
 /** Snapshot every current source relation in deterministic order and attach its integrity digest.
- * @returns {Promise<object>} A complete v1/v9 Kuwi backup envelope.
+ * @returns {Promise<object>} A complete v1/v10 Kuwi backup envelope.
  * @throws {Error} SQLite reads or Web Crypto digest generation fail.
  */
 async function createBackup() {
   const data = {
     currencies: rows("SELECT code, decimal_places FROM currencies ORDER BY code"),
-    profiles: rows("SELECT id, preferred_name, preferred_currency FROM profiles ORDER BY id"),
+    profiles: rows("SELECT id, preferred_name, preferred_currency, monthly_cycle_start_day FROM profiles ORDER BY id"),
     accounts: rows("SELECT id, name, type, currency_code, credit_limit_minor, created_at FROM accounts ORDER BY id"),
     accountAdjustments: rows("SELECT id, account_id, amount_minor, adjustment_type, created_at FROM account_adjustments ORDER BY id"),
     setup: rows("SELECT id, profile_id, first_account_id, completed_at FROM setup ORDER BY id"),
@@ -747,11 +787,11 @@ async function createBackup() {
         COALESCE((SELECT e.amount_minor FROM expenses e WHERE e.transfer_id=t.id),0) AS fee_amount_minor,
         t.date, t.note, t.created_at
       FROM transfers t ORDER BY t.id`),
-    pendingSyncOperations: rows("SELECT operation_id FROM pending_sync_operations ORDER BY operation_id"),
+    pendingSyncOperations: rows("SELECT operation_id, request_fingerprint FROM pending_sync_operations ORDER BY operation_id"),
     pendingTransferOperations: rows("SELECT operation_id, request_fingerprint FROM pending_transfer_operations ORDER BY operation_id"),
     incomeCategories: rows("SELECT id, label, sort_order FROM income_categories ORDER BY sort_order, id"),
     incomes: rows("SELECT id, account_id, category_id, amount_minor, date, note, planned, planned_amount_minor, created_at FROM incomes ORDER BY id"),
-    pendingIncomeSyncOperations: rows("SELECT operation_id FROM pending_income_sync_operations ORDER BY operation_id"),
+    pendingIncomeSyncOperations: rows("SELECT operation_id, request_fingerprint FROM pending_income_sync_operations ORDER BY operation_id"),
     pendingTransactionOperations: rows("SELECT operation_id, transaction_kind, transaction_id, operation_type, request_fingerprint, created_at FROM pending_transaction_operations ORDER BY operation_id"),
     budgets: rows("SELECT category_id, amount_milli, type, percentage_basis_points, interval, rollover_enabled, rollover_started_at, biweekly_start_date, biweekly_end_date FROM budgets ORDER BY category_id"),
     pendingBudgetOperations: rows("SELECT operation_id, category_id, operation_type, request_fingerprint, created_at FROM pending_budget_operations ORDER BY operation_id"),
@@ -835,9 +875,36 @@ function requireTimestamp(value, description) {
   requireText(value, description);
 }
 
+/** Validate an optional immutable create-request receipt from a v10 backup.
+ * @param {object} marker - Expense or income sync marker with its original request.
+ * @param {"expense"|"income"} kind - Transaction kind that owns the marker.
+ * @returns {void} Returns after the receipt is canonical and internally valid.
+ * @throws {Error} The receipt is malformed or its normalized fields are invalid.
+ */
+function validateCreateReceipt(marker, kind) {
+  if (marker.request_fingerprint === null) return;
+  if (typeof marker.request_fingerprint !== "string")
+    throw Error(`Backup data constraints failed: a ${kind} create receipt is invalid.`);
+  let request;
+  try { request = JSON.parse(marker.request_fingerprint); } catch {
+    throw Error(`Backup data constraints failed: a ${kind} create receipt is invalid.`);
+  }
+  const fields = ["accountId", "amountMinor", "capturedDate", "categoryId", "date", "note", "planned"];
+  if (!request || Array.isArray(request) || typeof request !== "object" ||
+    Object.keys(request).sort().join("\0") !== fields.join("\0") ||
+    typeof request.accountId !== "string" || !request.accountId.trim() ||
+    (request.categoryId !== null && typeof request.categoryId !== "string") ||
+    !Number.isSafeInteger(request.amountMinor) || request.amountMinor < (kind === "expense" ? 1 : 0) ||
+    !isValidDate(request.capturedDate) || !isValidDate(request.date) ||
+    (request.note !== null && typeof request.note !== "string") ||
+    typeof request.planned !== "boolean" || canonicalJson(request) !== marker.request_fingerprint)
+    throw Error(`Backup data constraints failed: a ${kind} create receipt is invalid.`);
+}
+
 /** Validate supported backup envelopes, row constraints, and references without changing live tables.
- * Accepts schemas 3 through 9, including both independent v8 layouts. Missing
- * planned state and legacy same-currency transfer fields are normalized in memory.
+ * Accepts schemas 3 through 10, including both independent v8 layouts. Missing
+ * planned state, create receipts, monthly-cycle preferences, and legacy same-currency
+ * transfer fields are normalized in memory.
  * @param {unknown} backup - Parsed candidate file contents.
  * @returns {Promise<object>} The candidate's validated current relation rows.
  * @throws {Error} The format, version, integrity digest, schema, constraints, or references fail.
@@ -847,7 +914,7 @@ async function validateBackup(backup) {
     throw Error("This file is not a Kuwi backup.");
   if (backup.version !== backupVersion ||
     ![legacyBackupSchemaVersion, previousBackupSchemaVersion, transactionBackupSchemaVersion,
-      transferBackupSchemaVersion, 7, 8, backupSchemaVersion].includes(backup.schemaVersion))
+      transferBackupSchemaVersion, 7, 8, 9, backupSchemaVersion].includes(backup.schemaVersion))
     throw Error("This Kuwi backup uses an unsupported version.");
   const expectedEnvelopeKeys = ["data", "exportedAt", "format", "integrity", "schemaVersion", "version"];
   if (Object.keys(backup).sort().join("\0") !== expectedEnvelopeKeys.sort().join("\0"))
@@ -879,12 +946,13 @@ async function validateBackup(backup) {
   const combinedTransactionRelations = [...combinedRelations, "pendingTransactionOperations"];
   const v6Relations = combinedTransactionRelations;
   const currentRelations = [...v6Relations, "budgets", "pendingBudgetOperations"];
+  const currentRelations10 = currentRelations;
   const relationKeys = data && typeof data === "object" && !Array.isArray(data)
     ? Object.keys(data).sort().join("\0")
     : "";
   const keysFor = (relations) => [...relations].sort().join("\0");
-  const hasBudgetRelations = [7, 8, 9].includes(backup.schemaVersion) &&
-    relationKeys === keysFor(currentRelations);
+  const hasBudgetRelations = [7, 8, 9, 10].includes(backup.schemaVersion) &&
+    [currentRelations, currentRelations10].some((relations) => relationKeys === keysFor(relations));
   const hasIncomeRelations = [incomeRelations, combinedRelations, incomeTransactionRelations, combinedTransactionRelations, currentRelations]
     .some((relations) => relationKeys === keysFor(relations));
   const hasTransferRelations = [transferRelations, combinedRelations, transferTransactionRelations, combinedTransactionRelations, currentRelations]
@@ -893,7 +961,7 @@ async function validateBackup(backup) {
     .some((relations) => relationKeys === keysFor(relations));
   const transferRows = data?.transfers;
   // Two independent v8 branches reused a schema number; populated rows distinguish their layouts.
-  const hasCurrencyAwareTransfers = backup.schemaVersion === 9 ||
+  const hasCurrencyAwareTransfers = backup.schemaVersion === 9 || backup.schemaVersion === 10 ||
     ((backup.schemaVersion === 8 || (backup.schemaVersion === 7 && !hasBudgetRelations)) &&
       Array.isArray(transferRows) && transferRows.some((row) =>
         Object.hasOwn(row ?? {}, "received_amount_minor") || Object.hasOwn(row ?? {}, "exchange_rate")));
@@ -905,9 +973,10 @@ async function validateBackup(backup) {
    */
   const plannedFields = (rowsToInspect, field) => Array.isArray(rowsToInspect) &&
     rowsToInspect.some((row) => Object.hasOwn(row ?? {}, field));
-  const hasPlannedRelations = backup.schemaVersion === 9 ||
+  const hasPlannedRelations = backup.schemaVersion === 9 || backup.schemaVersion === 10 ||
     (backup.schemaVersion === 8 && (plannedFields(data?.expenses, "planned_amount_minor") ||
       plannedFields(data?.incomes, "planned_amount_minor")));
+  const hasCreateReceipts = backup.schemaVersion === 10;
   const supportedRelations = backup.schemaVersion === legacyBackupSchemaVersion
     ? [legacyRelations]
     : backup.schemaVersion === previousBackupSchemaVersion
@@ -918,14 +987,16 @@ async function validateBackup(backup) {
           ? [v6Relations]
           : backup.schemaVersion === 7
             ? [combinedTransactionRelations, currentRelations]
-            : backup.schemaVersion === 8 || backup.schemaVersion === 9
+            : backup.schemaVersion === 8 || backup.schemaVersion === 9 || backup.schemaVersion === 10
               ? [currentRelations]
               : [currentRelations];
   if (!data || typeof data !== "object" || Array.isArray(data) ||
     !supportedRelations.some((relations) => relationKeys === keysFor(relations)))
     throw Error("Backup data constraints failed: the data set is incomplete or unsupported.");
   const currencies = requireRows(data, "currencies", ["code", "decimal_places"]);
-  const profiles = requireRows(data, "profiles", ["id", "preferred_name", "preferred_currency"]);
+  const profiles = requireRows(data, "profiles", hasCreateReceipts
+    ? ["id", "preferred_name", "preferred_currency", "monthly_cycle_start_day"]
+    : ["id", "preferred_name", "preferred_currency"]);
   const accounts = requireRows(data, "accounts", ["id", "name", "type", "currency_code", "credit_limit_minor", "created_at"]);
   const adjustments = requireRows(data, "accountAdjustments", ["id", "account_id", "amount_minor", "adjustment_type", "created_at"]);
   const setupRows = requireRows(data, "setup", ["id", "profile_id", "first_account_id", "completed_at"]);
@@ -936,7 +1007,9 @@ async function validateBackup(backup) {
     : ["id", "account_id", "category_id", "amount_minor", "date", "note", "created_at"];
   if (hasPlannedRelations) expenseFields.push("planned", "planned_amount_minor");
   const expenses = requireRows(data, "expenses", expenseFields);
-  const pendingSync = requireRows(data, "pendingSyncOperations", ["operation_id"]);
+  const pendingSync = requireRows(data, "pendingSyncOperations", hasCreateReceipts
+    ? ["operation_id", "request_fingerprint"]
+    : ["operation_id"]);
   const transfers = hasTransferRelations
     ? requireRows(data, "transfers", hasCurrencyAwareTransfers
       ? ["id", "from_account_id", "to_account_id", "amount_minor", "received_amount_minor", "exchange_rate", "fee_amount_minor", "date", "note", "created_at"]
@@ -953,8 +1026,15 @@ async function validateBackup(backup) {
   incomeFields.push("created_at");
   const incomes = hasIncomeRelations ? requireRows(data, "incomes", incomeFields) : [];
   const pendingIncomeSync = hasIncomeRelations
-    ? requireRows(data, "pendingIncomeSyncOperations", ["operation_id"])
+    ? requireRows(data, "pendingIncomeSyncOperations", hasCreateReceipts
+      ? ["operation_id", "request_fingerprint"]
+      : ["operation_id"])
     : [];
+  if (!hasCreateReceipts) {
+    for (const profile of profiles) profile.monthly_cycle_start_day = 1;
+    for (const marker of pendingSync) marker.request_fingerprint = null;
+    for (const marker of pendingIncomeSync) marker.request_fingerprint = null;
+  }
   const pendingTransactionOperations = hasTransactionOperations
     ? requireRows(data, "pendingTransactionOperations", ["operation_id", "transaction_kind", "transaction_id", "operation_type", "request_fingerprint", "created_at"])
     : [];
@@ -989,6 +1069,16 @@ async function validateBackup(backup) {
   const incomeCategoryIds = requireUnique(incomeCategories, "id", "incomeCategories");
   const incomeIds = requireUnique(incomes, "id", "incomes");
   const pendingIncomeIds = requireUnique(pendingIncomeSync, "operation_id", "pendingIncomeSyncOperations");
+  for (const marker of pendingSync) {
+    if (!expenseIds.has(marker.operation_id))
+      throw Error("Backup reference check failed: an expense sync marker refers to a missing expense.");
+    validateCreateReceipt(marker, "expense");
+  }
+  for (const marker of pendingIncomeSync) {
+    if (!incomeIds.has(marker.operation_id))
+      throw Error("Backup reference check failed: an income sync marker refers to a missing income.");
+    validateCreateReceipt(marker, "income");
+  }
   const accountsById = new Map(accounts.map((row) => [row.id, row]));
   const transfersById = new Map(transfers.map((row) => [row.id, row]));
   requireUnique(pendingTransactionOperations, "operation_id", "pendingTransactionOperations");
@@ -1002,6 +1092,9 @@ async function validateBackup(backup) {
     requireText(profile.preferred_name, "profiles.preferred_name");
     if (!currencyCodes.has(profile.preferred_currency))
       throw Error("Backup reference check failed: profile currency is missing.");
+    requireInteger(profile.monthly_cycle_start_day, "profiles.monthly_cycle_start_day", { minimum: 1 });
+    if (profile.monthly_cycle_start_day > 31)
+      throw Error("Backup data constraints failed: monthly cycle start day is invalid.");
   }
   for (const accountRow of accounts) {
     requireText(accountRow.name, "accounts.name");
@@ -1216,7 +1309,7 @@ function replaceBackupData(data) {
       }
     };
     insertRows("currencies", ["code", "decimal_places"], data.currencies);
-    insertRows("profiles", ["id", "preferred_name", "preferred_currency"], data.profiles);
+    insertRows("profiles", ["id", "preferred_name", "preferred_currency", "monthly_cycle_start_day"], data.profiles);
     insertRows("categories", ["id", "label", "sort_order"], data.categories);
     insertRows("budgets", ["category_id", "amount_milli", "type", "percentage_basis_points", "interval", "rollover_enabled", "rollover_started_at", "biweekly_start_date", "biweekly_end_date"], data.budgets);
     insertRows("pending_budget_operations", ["operation_id", "category_id", "operation_type", "request_fingerprint", "created_at"], data.pendingBudgetOperations);
@@ -1227,9 +1320,9 @@ function replaceBackupData(data) {
     insertRows("pending_operations", ["id", "account_id", "operation_type", "request_fingerprint", "created_at"], data.pendingOperations);
     insertRows("transfers", ["id", "from_account_id", "to_account_id", "amount_minor", "date", "note", "created_at", "received_amount_minor", "exchange_rate"], data.transfers);
     insertRows("expenses", ["id", "account_id", "category_id", "amount_minor", "date", "note", "created_at", "transfer_id", "planned", "planned_amount_minor"], data.expenses);
-    insertRows("pending_sync_operations", ["operation_id"], data.pendingSyncOperations);
+    insertRows("pending_sync_operations", ["operation_id", "request_fingerprint"], data.pendingSyncOperations);
     insertRows("incomes", ["id", "account_id", "category_id", "amount_minor", "date", "note", "planned", "planned_amount_minor", "created_at"], data.incomes);
-    insertRows("pending_income_sync_operations", ["operation_id"], data.pendingIncomeSyncOperations);
+    insertRows("pending_income_sync_operations", ["operation_id", "request_fingerprint"], data.pendingIncomeSyncOperations);
     insertRows("pending_transfer_operations", ["operation_id", "request_fingerprint"], data.pendingTransferOperations);
     insertRows("pending_transaction_operations", ["operation_id", "transaction_kind", "transaction_id", "operation_type", "request_fingerprint", "created_at"], data.pendingTransactionOperations);
   });
@@ -1326,10 +1419,9 @@ function isValidDate(value) {
 
 /**
  * Save one posted or planned expense and its pending sync marker atomically.
- * The operation ID is also the expense ID. Identical retries return the saved
- * ledger; reuse with different account, category, amount, date, or note fails.
- * The optional planned flag preserves the submit attempt's intent across retries.
- * @param {object} args - Expense operation ID, account/category IDs, positive minor units, date, optional note, and planned flag.
+ * The marker preserves the normalized request and local submission date so a
+ * retry after its due date or a later edit still uses the original plan intent.
+ * @param {object} args - Operation ID, account ID, category ID (defaults to other), positive minor units, valid date, optional note, and optional planned intent.
  * @returns {{ledger: object, replayed: boolean}} The refreshed account ledger and whether this was a retry.
  * @throws {Error} Invalid fields, unavailable references, a conflicting retry,
  *   reuse of a deleted transaction ID, or a failed database write.
@@ -1346,7 +1438,8 @@ function createExpense(args) {
   if (!isValidDate(date)) throw Error("Choose a valid expense date.");
   if (args.planned != null && typeof args.planned !== "boolean")
     throw Error("Choose a valid expense planned state.");
-  const planned = args.planned === true || date > localDate();
+  const capturedDate = localDate();
+  let planned = args.planned === true || date > capturedDate;
   const selectedAccount = account(accountId);
   if (!selectedAccount) throw Error("Choose an available account.");
   if (!rows("SELECT id FROM categories WHERE id=?", [categoryId])[0])
@@ -1360,18 +1453,33 @@ function createExpense(args) {
     )[0])
       throw Error("This expense ID was already deleted and cannot be reused.");
     const existing = rows(
-      `SELECT e.account_id, e.category_id, e.amount_minor, e.date, e.note
+      `SELECT e.account_id, e.category_id, e.amount_minor, e.date, e.note, e.planned, p.request_fingerprint
        FROM expenses e JOIN pending_sync_operations p ON p.operation_id=e.id
        WHERE p.operation_id=?`,
       [operationId],
     )[0];
     if (existing) {
-      if (
-        existing.account_id !== accountId ||
-        existing.category_id !== categoryId ||
-        existing.amount_minor !== amountMinor ||
-        existing.date !== date ||
-        existing.note !== note
+      let priorRequest = null;
+      if (existing.request_fingerprint) {
+        try { priorRequest = JSON.parse(existing.request_fingerprint); } catch { /* Treat malformed legacy receipts as conflicts. */ }
+      }
+      if (args.planned == null && priorRequest && typeof priorRequest.planned === "boolean")
+        planned = priorRequest.planned;
+      if (priorRequest) {
+        const { capturedDate: originalCapturedDate, ...originalRequest } = priorRequest;
+        let request = { accountId, categoryId, amountMinor, date, note, planned };
+        const currentDate = localDate();
+        if (originalRequest.planned && !planned && originalRequest.date > originalCapturedDate &&
+          date <= currentDate && canonicalJson(originalRequest) === canonicalJson({ ...request, planned: true })) {
+          planned = true;
+          request = { ...request, planned: true };
+        }
+        if (canonicalJson(originalRequest) !== canonicalJson(request))
+          throw Error("This save retry contains different expense details.");
+      } else if (
+        existing.account_id !== accountId || existing.category_id !== categoryId ||
+        existing.amount_minor !== amountMinor || existing.date !== date || existing.note !== note ||
+        (args.planned != null && existing.planned !== Number(planned))
       )
         throw Error("This save retry contains different expense details.");
       replayed = true;
@@ -1383,8 +1491,8 @@ function createExpense(args) {
       bind: [operationId, accountId, categoryId, amountMinor, date, note, createdAt, Number(planned)],
     });
     db.exec({
-      sql: "INSERT INTO pending_sync_operations(operation_id) VALUES(?)",
-      bind: [operationId],
+      sql: "INSERT INTO pending_sync_operations(operation_id, request_fingerprint) VALUES(?,?)",
+      bind: [operationId, canonicalJson({ accountId, amountMinor, capturedDate, categoryId, date, note, planned })],
     });
   });
   return { ledger: readLedger(accountId), replayed };
@@ -1392,10 +1500,9 @@ function createExpense(args) {
 
 /**
  * Save one income and its pending sync marker atomically.
- * The operation ID is also the income ID. Planned intent captured by the
- * submit attempt survives a retry after its date becomes due. Planned income
- * does not affect the balance and may have a zero amount. Identical
- * retries return the saved ledger, while changed content under the same ID fails.
+ * The marker preserves the normalized request and local submission date so a
+ * retry after its due date or a later edit still uses the original plan intent.
+ * Planned income does not affect the balance and may have a zero amount.
  * @param {object} args - Operation ID, Debit/Credit account ID, optional category ID,
  *   nonnegative account-currency minor units, valid date, optional planned intent, and note.
  * @returns {{ledger: object, replayed: boolean}} The refreshed ledger and whether this was a retry.
@@ -1416,7 +1523,8 @@ function createIncome(args) {
   if (!isValidDate(date)) throw Error("Choose a valid income date.");
   if (args.planned != null && typeof args.planned !== "boolean")
     throw Error("Choose a valid income planned state.");
-  const planned = args.planned === true || date > localDate();
+  const capturedDate = localDate();
+  let planned = args.planned === true || date > capturedDate;
   if (amountMinor === 0 && !planned)
     throw Error("Enter an income amount greater than zero.");
   if (args.categoryId != null && typeof args.categoryId !== "string")
@@ -1438,18 +1546,33 @@ function createIncome(args) {
     )[0])
       throw Error("This income ID was already deleted and cannot be reused.");
     const existing = rows(
-      `SELECT i.account_id, i.category_id, i.amount_minor, i.date, i.note
+      `SELECT i.account_id, i.category_id, i.amount_minor, i.date, i.note, i.planned, p.request_fingerprint
        FROM incomes i JOIN pending_income_sync_operations p ON p.operation_id=i.id
        WHERE p.operation_id=?`,
       [operationId],
     )[0];
     if (existing) {
-      if (
-        existing.account_id !== accountId ||
-        existing.category_id !== categoryId ||
-        existing.amount_minor !== amountMinor ||
-        existing.date !== date ||
-        existing.note !== note
+      let priorRequest = null;
+      if (existing.request_fingerprint) {
+        try { priorRequest = JSON.parse(existing.request_fingerprint); } catch { /* Treat malformed legacy receipts as conflicts. */ }
+      }
+      if (args.planned == null && priorRequest && typeof priorRequest.planned === "boolean")
+        planned = priorRequest.planned;
+      if (priorRequest) {
+        const { capturedDate: originalCapturedDate, ...originalRequest } = priorRequest;
+        let request = { accountId, categoryId, amountMinor, date, note, planned };
+        const currentDate = localDate();
+        if (originalRequest.planned && !planned && originalRequest.date > originalCapturedDate &&
+          date <= currentDate && canonicalJson(originalRequest) === canonicalJson({ ...request, planned: true })) {
+          planned = true;
+          request = { ...request, planned: true };
+        }
+        if (canonicalJson(originalRequest) !== canonicalJson(request))
+          throw Error("This save retry contains different income details.");
+      } else if (
+        existing.account_id !== accountId || existing.category_id !== categoryId ||
+        existing.amount_minor !== amountMinor || existing.date !== date || existing.note !== note ||
+        (args.planned != null && existing.planned !== Number(planned))
       )
         throw Error("This save retry contains different income details.");
       replayed = true;
@@ -1461,8 +1584,8 @@ function createIncome(args) {
       bind: [operationId, accountId, categoryId, amountMinor, date, note, Number(planned), createdAt],
     });
     db.exec({
-      sql: "INSERT INTO pending_income_sync_operations(operation_id) VALUES(?)",
-      bind: [operationId],
+      sql: "INSERT INTO pending_income_sync_operations(operation_id, request_fingerprint) VALUES(?,?)",
+      bind: [operationId, canonicalJson({ accountId, amountMinor, capturedDate, categoryId, date, note, planned })],
     });
   });
   return { ledger: readLedger(accountId), replayed };
@@ -1877,7 +2000,7 @@ async function complete(args) {
     if (existing) return existing;
     const accountId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
-    db.exec({ sql: "INSERT INTO profiles VALUES(?,?,?)", bind: ["local", name, currency] });
+    db.exec({ sql: "INSERT INTO profiles(id,preferred_name,preferred_currency,monthly_cycle_start_day) VALUES(?,?,?,1)", bind: ["local", name, currency] });
     db.exec({
       sql: "INSERT INTO accounts VALUES(?,?, 'debit', ?, NULL, ?)",
       bind: [accountId, accountName, currency, createdAt],
@@ -1925,6 +2048,7 @@ async function dispatch({ id, command, args = {} }) {
     else if (command === "restoreBackup") result = await restoreBackup(args.backup);
     else if (command === "budgetState") result = budgetState();
     else if (command === "saveBudget") result = await saveBudget(args);
+    else if (command === "saveMonthlyCycleStartDay") result = saveMonthlyCycleStartDay(args);
     else throw Error("Unknown database operation.");
     self.postMessage({ id, result });
   } catch (error) {

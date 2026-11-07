@@ -97,6 +97,49 @@ async function openBudgets(page) {
   await expect(page.getByRole("heading", { name: "Budgets", level: 1 })).toBeVisible();
 }
 
+test("monthly cycle preference changes budget periods and survives backup restore", async ({ page }) => {
+  await finishSetup(page);
+  await openBudgets(page);
+  await expect(page.getByLabel("Monthly cycle start day")).toHaveValue("1");
+  await page.getByLabel("Monthly cycle start day").fill("15");
+  await page.getByRole("button", { name: "Save monthly cycle", exact: true }).click();
+  await expect(page.getByLabel("Monthly cycle start day")).toHaveValue("15");
+
+  const today = await page.evaluate(() => {
+    const date = new Date();
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  });
+  const [year, month, day] = today.split("-").map(Number);
+  const cycleMonth = day < 15 ? month - 2 : month - 1;
+  const startDate = new Date(Date.UTC(year, cycleMonth, 15));
+  const nextStart = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth() + 1, 15));
+  nextStart.setUTCDate(nextStart.getUTCDate() - 1);
+  const period = `${startDate.toISOString().slice(0, 10)} to ${nextStart.toISOString().slice(0, 10)}`;
+  await page.getByRole("button", { name: "Set Food budget", exact: true }).click();
+  await page.getByLabel("Budget amount", { exact: true }).fill("1000");
+  await page.getByRole("button", { name: "Save budget", exact: true }).click();
+  await expect(page.getByText(period, { exact: false })).toBeVisible();
+
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export backup", exact: true }).click();
+  const backup = JSON.parse(await readFile(await (await downloadPromise).path(), "utf8"));
+  expect(backup.schemaVersion).toBe(10);
+  expect(backup.data.profiles[0].monthly_cycle_start_day).toBe(15);
+
+  const chooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Restore backup", exact: true }).click();
+  await (await chooserPromise).setFiles({
+    name: "monthly-cycle.kuwi.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(backup)),
+  });
+  await expect(page.getByText("Backup restored.", { exact: true })).toBeVisible();
+  await openBudgets(page);
+  await expect(page.getByLabel("Monthly cycle start day")).toHaveValue("15");
+  await expect(page.getByText(period, { exact: false })).toBeVisible();
+});
+
 test("budget progress follows corrected expenses, income, and transfer fees after offline reopening and restore", async ({
   browserName,
   baseURL,
@@ -207,7 +250,7 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
     const download = await downloadPromise;
     const backup = JSON.parse(await readFile(await download.path(), "utf8"));
-    expect(backup.schemaVersion).toBe(9);
+    expect(backup.schemaVersion).toBe(10);
     expect(backup.data.budgets).toHaveLength(3);
     expect(backup.data.pendingBudgetOperations).toHaveLength(4);
     expect(backup.data.budgets.find(({ category_id }) => category_id === "food")).toMatchObject({

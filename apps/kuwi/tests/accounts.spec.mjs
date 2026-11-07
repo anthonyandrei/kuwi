@@ -448,7 +448,7 @@ test("a legacy expense and backup survive the shell update", async ({
     const currentDownload = await currentDownloadPromise;
     const currentBackup = JSON.parse(readFileSync(await currentDownload.path(), "utf8"));
     expect(currentBackup).toMatchObject({
-      schemaVersion: 9,
+      schemaVersion: 10,
       data: {
         expenses: expect.arrayContaining([expect.objectContaining({ transfer_id: expect.any(String) })]),
         transfers: [expect.objectContaining({ fee_amount_minor: 456, note: "Updated schema transfer" })],
@@ -682,11 +682,11 @@ test("expense and income edits move effects between accounts and deletions prese
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(9);
+  expect(backup.schemaVersion).toBe(10);
   expect(backup.data.expenses).toHaveLength(1);
   expect(backup.data.expenses[0].note).toBe("Rent");
   expect(backup.data.pendingSyncOperations).toEqual([
-    { operation_id: backup.data.expenses[0].id },
+    expect.objectContaining({ operation_id: backup.data.expenses[0].id, request_fingerprint: expect.any(String) }),
   ]);
   expect(backup.data.incomes).toHaveLength(0);
   expect(backup.data.pendingIncomeSyncOperations).toHaveLength(0);
@@ -815,7 +815,7 @@ test("an edit with a lost reply reuses its saved operation ID", async ({
   expect(backup.data.expenses).toHaveLength(1);
   expect(backup.data.expenses[0].amount_minor).toBe(2200);
   expect(backup.data.pendingSyncOperations).toEqual([
-    { operation_id: backup.data.expenses[0].id },
+    expect.objectContaining({ operation_id: backup.data.expenses[0].id, request_fingerprint: expect.any(String) }),
   ]);
   expect(backup.data.pendingTransactionOperations).toHaveLength(2);
   expect(
@@ -855,7 +855,7 @@ test("a populated v4 database migrates while keeping account and transaction ide
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(9);
+  expect(backup.schemaVersion).toBe(10);
   expect(backup.data.accounts.map(({ id }) => id)).toEqual(["legacy-cash", "legacy-reserve"]);
   expect(backup.data.expenses.map(({ id }) => id)).toEqual(["legacy-expense"]);
   expect(backup.data.incomes.map(({ id }) => id)).toEqual(["legacy-income"]);
@@ -887,7 +887,7 @@ test("a populated v5 database gains transfer relations without losing transactio
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup).toMatchObject({
-    schemaVersion: 9,
+    schemaVersion: 10,
     data: {
       expenses: expect.arrayContaining([
         expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
@@ -947,7 +947,7 @@ test("a populated v4 transfer database keeps its transfer and linked fee through
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup).toMatchObject({
-    schemaVersion: 9,
+    schemaVersion: 10,
     data: {
       expenses: expect.arrayContaining([
         expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
@@ -1006,7 +1006,7 @@ test("cross-currency transfers preserve both minor-unit amounts through history,
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(9);
+  expect(backup.schemaVersion).toBe(10);
   expect(backup.data.transfers).toEqual([
     expect.objectContaining({
       amount_minor: 10000,
@@ -1023,6 +1023,45 @@ test("cross-currency transfers preserve both minor-unit amounts through history,
     buffer: Buffer.from(JSON.stringify(backup)),
   });
   await expect(page.getByText(/(?:JP)?¥14,987/)).toBeVisible();
+});
+
+test("received-amount entry keeps its entered minor units when the implied rate cannot round-trip", async ({ page }) => {
+  await finishSetup(page);
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByLabel("Account name").fill("Yen source");
+  await page.getByRole("button", { name: "JPY Japanese Yen" }).click();
+  await page.getByLabel("Opening balance (JPY)").fill("100");
+  await page.getByRole("button", { name: "Save account" }).click();
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByLabel("Account name").fill("Dollar destination");
+  await page.getByRole("button", { name: "USD US Dollar" }).click();
+  await page.getByLabel("Opening balance (USD)").fill("0");
+  await page.getByRole("button", { name: "Save account" }).click();
+
+  await page.getByRole("button", { name: "View account Yen source" }).click();
+  await page.getByRole("button", { name: "Transfer between accounts" }).click();
+  await page.getByLabel("To account").selectOption({ label: "Dollar destination" });
+  await page.getByLabel("Transfer amount").fill("3");
+  await page.getByLabel("Amount received (USD)").fill("0.01");
+  await expect(page.getByLabel("Exchange rate")).not.toHaveValue("");
+  await page.getByRole("button", { name: "Save transfer" }).click();
+  await expect(page.getByText(/¥97/)).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history" }).click();
+  await expect(page.getByText(/Sent (?:JP)?¥3 JPY · received (?:US)?\$0\.01 USD/)).toBeVisible();
+  await page.getByRole("button", { name: "Back to account" }).click();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
+  await page.getByRole("button", { name: "View account Dollar destination" }).click();
+  await expect(page.getByText(/\$0\.01/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Back to accounts" }).click();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export backup" }).click();
+  const backup = JSON.parse(readFileSync(await (await downloadPromise).path(), "utf8"));
+  expect(backup.data.transfers[0]).toMatchObject({
+    amount_minor: 3,
+    received_amount_minor: 1,
+    exchange_rate: expect.any(String),
+  });
 });
 
 test("a failed cross-currency write rolls back every effect and retries once", async ({
@@ -1119,7 +1158,7 @@ test("a populated budget-only v7 store retries into v8 without losing budget or 
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(9);
+  expect(backup.schemaVersion).toBe(10);
   expect(backup.data.budgets).toEqual([
     expect.objectContaining({ category_id: "food", amount_milli: 100000, interval: "monthly" }),
   ]);
@@ -1148,7 +1187,7 @@ test("a populated currency-aware v7 store keeps received amounts when budgets ar
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(9);
+  expect(backup.schemaVersion).toBe(10);
   expect(backup.data.transfers).toEqual([
     expect.objectContaining({
       id: "legacy-transfer",

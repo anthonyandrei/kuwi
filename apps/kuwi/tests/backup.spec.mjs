@@ -101,11 +101,29 @@ function withValidDigest(backup) {
   };
 }
 
+/** Remove the v10 profile and create-receipt fields from a backup candidate.
+ * @param {object} backup - Candidate backup to downgrade for restoration.
+ * @returns {object} The same backup with its pre-v10 row shape restored.
+ */
+function removeV10Fields(backup) {
+  backup.data.profiles = backup.data.profiles.map(
+    ({ monthly_cycle_start_day, ...profile }) => profile,
+  );
+  backup.data.pendingSyncOperations = backup.data.pendingSyncOperations.map(
+    ({ request_fingerprint, ...marker }) => marker,
+  );
+  backup.data.pendingIncomeSyncOperations = backup.data.pendingIncomeSyncOperations.map(
+    ({ request_fingerprint, ...marker }) => marker,
+  );
+  return backup;
+}
+
 /** Remove fields that were introduced after a legacy backup schema.
  * @param {object} backup - Candidate backup to downgrade for restoration.
  * @returns {object} The same backup with its legacy row shape restored.
  */
 function removePlannedFields(backup) {
+  removeV10Fields(backup);
   backup.data.expenses = backup.data.expenses.map(
     ({ planned, planned_amount_minor, ...expense }) => expense,
   );
@@ -195,10 +213,10 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     expect(backup).toMatchObject({
       format: "kuwi.backup",
       version: 1,
-      schemaVersion: 9,
+      schemaVersion: 10,
       integrity: { algorithm: "SHA-256" },
       data: {
-        profiles: [{ preferred_name: "Anthony", preferred_currency: "PHP" }],
+        profiles: [{ preferred_name: "Anthony", preferred_currency: "PHP", monthly_cycle_start_day: 1 }],
         accounts: expect.arrayContaining([
           expect.objectContaining({ name: "Cash", currency_code: "PHP" }),
           expect.objectContaining({ name: "Reserve", currency_code: "PHP" }),
@@ -282,6 +300,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const currencyV8Backup = structuredClone(backup);
     currencyV8Backup.schemaVersion = 8;
+    removeV10Fields(currencyV8Backup);
     currencyV8Backup.data.expenses = currencyV8Backup.data.expenses.map(
       ({ planned, planned_amount_minor, ...expense }) => expense,
     );
@@ -297,6 +316,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const plannedV8Backup = structuredClone(backup);
     plannedV8Backup.schemaVersion = 8;
+    removeV10Fields(plannedV8Backup);
     plannedV8Backup.data.transfers = plannedV8Backup.data.transfers.map(
       ({ received_amount_minor, exchange_rate, ...transfer }) => transfer,
     );
@@ -304,6 +324,16 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       name: "planned-v8.kuwi.json",
       mimeType: "application/json",
       buffer: Buffer.from(JSON.stringify(withValidDigest(plannedV8Backup))),
+    });
+    await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
+
+    const plannedV9Backup = structuredClone(backup);
+    plannedV9Backup.schemaVersion = 9;
+    removeV10Fields(plannedV9Backup);
+    await restoreFile(page, {
+      name: "planned-v9.kuwi.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(plannedV9Backup))),
     });
     await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
 
@@ -352,6 +382,16 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(orphanedOperation))),
     });
     await expect(page.getByRole("alert")).toContainText("transaction operation is orphaned");
+    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+
+    const tamperedCreateReceipt = structuredClone(backup);
+    tamperedCreateReceipt.data.pendingSyncOperations[0].request_fingerprint = "{}";
+    await restoreFile(page, {
+      name: "tampered-create-receipt.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(tamperedCreateReceipt))),
+    });
+    await expect(page.getByRole("alert")).toContainText("expense create receipt is invalid");
     await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
 
     const orphanedLog = structuredClone(backup);

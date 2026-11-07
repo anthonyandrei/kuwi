@@ -119,6 +119,8 @@ export function BudgetWorkspace({
   const [form, setForm] = useState<BudgetForm | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [cycleDay, setCycleDay] = useState(String(initialState.monthlyCycleStartDay));
+  const [savingCycleDay, setSavingCycleDay] = useState(false);
   const [operationAttempt, setOperationAttempt] = useState<{ key: string; id: string } | null>(null);
 
   /** Open a new form or load a category's current definition.
@@ -240,6 +242,27 @@ export function BudgetWorkspace({
     }
   }
 
+  /** Save the preferred start day used by monthly budget periods.
+   * @returns Resolves after the canonical setting and progress refresh, or displays an error.
+   */
+  async function saveCycleDay() {
+    if (!/^\d+$/.test(cycleDay) || Number(cycleDay) < 1 || Number(cycleDay) > 31) {
+      setError("Choose a monthly cycle start day from 1 to 31.");
+      return;
+    }
+    setSavingCycleDay(true);
+    setError("");
+    try {
+      const next = await database<BudgetState>("saveMonthlyCycleStartDay", { day: Number(cycleDay) });
+      setState(next);
+      onStateChange(next);
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setSavingCycleDay(false);
+    }
+  }
+
   /** Close the editor, discard unsubmitted values, and reset retry identity.
    * @returns Nothing; updates the local editor state.
    */
@@ -271,6 +294,18 @@ export function BudgetWorkspace({
       <Text accessibilityRole="header" style={styles.heading}>Budgets</Text>
       <Text style={styles.note}>Category limits apply across all accounts.</Text>
       <Text style={styles.note}>Budget currency: {state.preferredCurrency ?? "unavailable"}</Text>
+      <View style={styles.cyclePreference}>
+        <Text style={styles.label}>Monthly cycle starts on day</Text>
+        <TextInput
+          accessibilityLabel="Monthly cycle start day"
+          keyboardType="number-pad"
+          value={cycleDay}
+          onChangeText={setCycleDay}
+          style={styles.cycleInput}
+        />
+        {button(savingCycleDay ? "Saving…" : "Save monthly cycle", () => void saveCycleDay(), savingCycleDay)}
+      </View>
+      {error && !form ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       {state.budgets.length ? (
         <View style={styles.summary}>
           <Text style={styles.label}>Current budgets</Text>
@@ -420,6 +455,8 @@ const styles = StyleSheet.create({
   note: { color: "#526355", fontSize: 13, lineHeight: 19 },
   summaryAmount: { color: ink, fontSize: 20, fontWeight: "700", fontVariant: ["tabular-nums"] },
   summary: { gap: 6, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#d4ddcf" },
+  cyclePreference: { gap: 9, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#d4ddcf" },
+  cycleInput: { width: 112, padding: 12, borderWidth: 1, borderColor: "#83927e", borderRadius: 12, fontSize: 17, color: ink, backgroundColor: "#fffdf7" },
   categories: { gap: 14 },
   category: { gap: 8, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: "#d4ddcf" },
   categoryHeading: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },

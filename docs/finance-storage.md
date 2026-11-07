@@ -20,10 +20,11 @@ budget receipts with same-currency transfers. Version 8 combines the v7 transfer
 and budget layouts. It has two populated shapes: currency-aware transfers
 without planned fields, and planned entries without currency-aware transfer
 columns. Version 9 adds planned expense state and scheduled amounts, planned
-income amounts, explicit log receipts, and normalizes transfer columns. It
-checks each column and relation before adding it, so either v8 shape upgrades
-without replacing existing rows. Each migration commits in its own transaction.
-A failed step keeps its starting schema and data for a retry.
+income amounts, explicit log receipts, and normalizes transfer columns. Version
+10 adds original create-request receipts for expense and income retries and a
+profile preference for the monthly budget cycle start day. Each migration
+checks existing columns before changing the schema and commits in its own
+transaction. A failed step keeps its starting schema and data for a retry.
 
 The v6 migration supports both earlier v4 layouts. Income-only v4 databases
 receive transfer relations, and v4 databases that already contain transfers
@@ -37,11 +38,18 @@ changes roll back together on failure. The v7-to-v8 migration adds or preserves
 the transfer currency columns before creating any missing budget relations.
 The v8-to-v9 migration adds whichever planned or currency columns are absent. If
 the receipt table lacks `log`, it rebuilds the table and copies existing receipts.
+The v9-to-v10 migration adds the monthly preference and nullable create
+receipts; existing marker rows keep null receipts and their existing data.
 
 ## Ledger writes and balances
 
 An expense and its pending sync marker commit together. Income and its pending
-sync marker use the same transaction boundary. Transfers write the source
+sync marker use the same transaction boundary. Each create marker preserves the
+normalized original request, planned intent, and local date at submission after
+a transaction is logged or corrected. A retry on or after a future plan's due
+date can still match its original intent. Same-ID changed content fails. Legacy
+records without a create receipt use their current row for retry checks.
+Transfers write the source
 principal, destination received amount, canonical rate, optional linked fee
 expense, fee sync marker, and pending transfer operation in one immediate
 transaction. The operation ID remains stable across retries. An identical
@@ -53,9 +61,12 @@ different Debit account. The source must have enough balance or available
 credit to cover source principal plus fee. The manual rate uses the direction
 `1 source currency = rate destination currency`, and both rate and received
 amount entry work offline. Received amounts are truncated to destination
-precision before storage. Kuwi parses the rate as a JavaScript number, stores
-its canonical decimal string, and uses that text for conversion to avoid binary
-floating-point tails. The source principal and fee use source minor units; the
+precision before storage. Kuwi parses the rate as a JavaScript number and stores
+its canonical decimal string. Rate entry multiplies the source amount using
+decimal arithmetic and truncates to destination precision. Received-amount
+entry derives and stores the implied JavaScript rate; that rate describes the
+manual amount and does not have to reproduce its minor units when multiplied
+back. The source principal and fee use source minor units; the
 received amount uses destination minor units. A positive fee is stored as an
 expense in the Fees category and references the transfer ID. The fee name is
 `Bank transfer fee to <destination>`. The transfer uses the selected date,
@@ -70,11 +81,14 @@ the same operation ID and content returns the committed state; changed content
 under that ID fails. Amount edits preserve a rollover start, while changing
 the interval or bi-weekly anchors starts a new rollover span.
 
+The profile stores a monthly cycle start day from 1 through 31, defaulting to 1.
+In months without that date, the cycle starts on the month's last day. The
+preference is editable in the budget workspace and included in backups.
+
 Progress comes from eligible expense and income rows each time it is read.
 Expenses count across accounts by category and inclusive period. Monthly periods
-currently start on day 1; Kuwi does not expose the WEB reference's configurable
-monthly start day. Actual income across all accounts and categories forms the
-percentage base; planned income is excluded. Planned expenses also stay out of
+use the configured cycle start day. Actual income across all accounts and
+categories forms the percentage base; planned income is excluded. Planned expenses also stay out of
 spending progress until logged. Transfers do not contribute their
 principal to spending. A transfer fee is already stored once as a linked Fees
 expense and counts once when it meets the budget date and eligibility rules.
@@ -110,18 +124,19 @@ be edited or deleted as ordinary expenses.
 ## Backup contract
 
 Exports use a JSON envelope with `format: "kuwi.backup"`, backup `version: 1`,
-`schemaVersion: 9`, an ISO `exportedAt`, and an integrity object with
+`schemaVersion: 10`, an ISO `exportedAt`, and an integrity object with
 `algorithm: "SHA-256"` and a lowercase digest. The digest covers the canonical
 JSON form of `format`, `version`, `schemaVersion`, and `data`. Object keys are
 sorted recursively before hashing, and array order is retained.
 
-Current v9 data includes currencies, profiles, accounts, adjustments, setup,
-pending account operations, expense categories and records, planned flags and
-scheduled amounts, pending expense sync markers, income categories and records,
-planned flags and scheduled amounts, pending income sync markers, transfers
-with source and received minor-unit amounts and their rate, pending transfer
-operations, transaction edit/delete/log receipts, canonical budget definitions,
-and pending budget operation receipts.
+Current v10 data includes currencies, profiles with the monthly cycle
+preference, accounts, adjustments, setup, pending account operations, expense
+categories and records, planned flags and scheduled amounts, pending expense
+sync markers with immutable create receipts, income categories and records,
+planned flags and scheduled amounts, pending income sync markers with immutable
+create receipts, transfers with source and received minor-unit amounts and
+their rate, pending transfer operations, transaction edit/delete/log receipts,
+canonical budget definitions, and pending budget operation receipts.
 The exported `fee_amount_minor` is derived from the linked fee expense. Joined
 labels and balances are also derived.
 
@@ -131,7 +146,8 @@ sets, v5 backups with transaction receipts, v6 backups with transfer data, and
 both v7 layouts. Version 8 backups with the current relation set are accepted
 in either populated shape: currency-aware transfer rows without planned
 amounts, or planned rows without currency-aware transfer fields. Older backups
-gain empty budget relations. Budget-only v7 and planned v8 backups gain
+gain empty budget relations. Version 9 backups default the monthly cycle day to
+1 and leave old create receipts empty. Budget-only v7 and planned v8 backups gain
 same-currency transfer amounts and rate `1`; currency-aware backups retain
 their recorded amounts and rates. It checks
 the digest, exact relation fields,

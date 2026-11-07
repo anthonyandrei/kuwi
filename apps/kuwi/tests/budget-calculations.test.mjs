@@ -29,6 +29,10 @@ test("budget periods follow the recovered calendar boundaries", () => {
     start: "2026-10-10",
     end: "2026-11-09",
   });
+  assert.deepEqual(budgetPeriod("monthly", "2026-11-15", { monthlyCycleStartDay: 15 }), {
+    start: "2026-11-15",
+    end: "2026-12-14",
+  });
   assert.deepEqual(budgetPeriod("monthly", "2026-11-07", { monthlyCycleStartDay: 31 }), {
     start: "2026-10-31",
     end: "2026-11-29",
