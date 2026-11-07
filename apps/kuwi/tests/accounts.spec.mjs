@@ -448,7 +448,7 @@ test("a legacy expense and backup survive the shell update", async ({
     const currentDownload = await currentDownloadPromise;
     const currentBackup = JSON.parse(readFileSync(await currentDownload.path(), "utf8"));
     expect(currentBackup).toMatchObject({
-      schemaVersion: 8,
+      schemaVersion: 9,
       data: {
         expenses: expect.arrayContaining([expect.objectContaining({ transfer_id: expect.any(String) })]),
         transfers: [expect.objectContaining({ fee_amount_minor: 456, note: "Updated schema transfer" })],
@@ -682,7 +682,7 @@ test("expense and income edits move effects between accounts and deletions prese
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(8);
+  expect(backup.schemaVersion).toBe(9);
   expect(backup.data.expenses).toHaveLength(1);
   expect(backup.data.expenses[0].note).toBe("Rent");
   expect(backup.data.pendingSyncOperations).toEqual([
@@ -855,7 +855,7 @@ test("a populated v4 database migrates while keeping account and transaction ide
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(8);
+  expect(backup.schemaVersion).toBe(9);
   expect(backup.data.accounts.map(({ id }) => id)).toEqual(["legacy-cash", "legacy-reserve"]);
   expect(backup.data.expenses.map(({ id }) => id)).toEqual(["legacy-expense"]);
   expect(backup.data.incomes.map(({ id }) => id)).toEqual(["legacy-income"]);
@@ -887,7 +887,7 @@ test("a populated v5 database gains transfer relations without losing transactio
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup).toMatchObject({
-    schemaVersion: 8,
+    schemaVersion: 9,
     data: {
       expenses: expect.arrayContaining([
         expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
@@ -947,7 +947,7 @@ test("a populated v4 transfer database keeps its transfer and linked fee through
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup).toMatchObject({
-    schemaVersion: 8,
+    schemaVersion: 9,
     data: {
       expenses: expect.arrayContaining([
         expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
@@ -1006,7 +1006,7 @@ test("cross-currency transfers preserve both minor-unit amounts through history,
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(8);
+  expect(backup.schemaVersion).toBe(9);
   expect(backup.data.transfers).toEqual([
     expect.objectContaining({
       amount_minor: 10000,
@@ -1119,7 +1119,7 @@ test("a populated budget-only v7 store retries into v8 without losing budget or 
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(8);
+  expect(backup.schemaVersion).toBe(9);
   expect(backup.data.budgets).toEqual([
     expect.objectContaining({ category_id: "food", amount_milli: 100000, interval: "monthly" }),
   ]);
@@ -1148,7 +1148,7 @@ test("a populated currency-aware v7 store keeps received amounts when budgets ar
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(8);
+  expect(backup.schemaVersion).toBe(9);
   expect(backup.data.transfers).toEqual([
     expect.objectContaining({
       id: "legacy-transfer",

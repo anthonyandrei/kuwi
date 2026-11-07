@@ -16,10 +16,14 @@ sync markers, and an account/date index. Version 5 adds transaction
 edit/delete receipts. Version 6 adds transfers, linked fee references on
 expenses, and pending transfer operations. Existing v7 stores have one of two
 layouts: currency-aware transfer amounts and rates, or category budgets and
-budget receipts with same-currency transfers. Version 8 combines both layouts.
-Opening either v7 store applies the missing migration and preserves its existing
-records. Each migration commits in its own transaction. A failed step keeps its
-starting schema and data for a retry.
+budget receipts with same-currency transfers. Version 8 combines the v7 transfer
+and budget layouts. It has two populated shapes: currency-aware transfers
+without planned fields, and planned entries without currency-aware transfer
+columns. Version 9 adds planned expense state and scheduled amounts, planned
+income amounts, explicit log receipts, and normalizes transfer columns. It
+checks each column and relation before adding it, so either v8 shape upgrades
+without replacing existing rows. Each migration commits in its own transaction.
+A failed step keeps its starting schema and data for a retry.
 
 The v6 migration supports both earlier v4 layouts. Income-only v4 databases
 receive transfer relations, and v4 databases that already contain transfers
@@ -31,6 +35,8 @@ and rate `1`. It backfills only when the received-amount column is absent, so
 reopening a currency-aware store preserves recorded values. Schema and data
 changes roll back together on failure. The v7-to-v8 migration adds or preserves
 the transfer currency columns before creating any missing budget relations.
+The v8-to-v9 migration adds whichever planned or currency columns are absent. If
+the receipt table lacks `log`, it rebuilds the table and copies existing receipts.
 
 ## Ledger writes and balances
 
@@ -68,44 +74,53 @@ Progress comes from eligible expense and income rows each time it is read.
 Expenses count across accounts by category and inclusive period. Monthly periods
 currently start on day 1; Kuwi does not expose the WEB reference's configurable
 monthly start day. Actual income across all accounts and categories forms the
-percentage base; planned income is excluded. Transfers do not contribute their
+percentage base; planned income is excluded. Planned expenses also stay out of
+spending progress until logged. Transfers do not contribute their
 principal to spending. A transfer fee is already stored once as a linked Fees
 expense and counts once when it meets the budget date and eligibility rules.
 Kuwi currently has no FX quote source, so progress is unavailable when
 qualifying expenses or income use a currency different from the profile's
 preferred currency.
 
-The app derives Debit and Assets balances from adjustments, expenses, posted
-income, and transfer principal. Expenses reduce those balances; posted income
-adds to them. Credit expenses increase the amount owed and posted income lowers
-it. Transfer principal reduces the source balance or increases its Credit debt,
-and the received amount increases the Debit destination balance. A fee reduces
-the source balance or increases its Credit debt. Planned income does not affect
-balances.
+The app derives Debit and Assets balances from adjustments, posted expenses,
+posted income, and transfer principal. Expenses reduce those balances; posted
+income adds to them. Credit expenses increase the amount owed and posted income
+lowers it. Transfer principal reduces the source balance or increases its
+Credit debt, and the received amount increases the Debit destination balance. A
+fee reduces the source balance or increases its Credit debt. Planned expenses
+and income do not affect balances.
 
-Editing an expense or income replaces its account, category, amount, date, and
-note while preserving its ID and creation time. The replacement and edit receipt
-commit together. Deleting a transaction, removing its create sync marker, and
-writing its delete receipt also commit together. Receipt IDs provide stable
-retries and retain deleted transaction IDs. Editing can move a transaction only
-between accounts with the same currency. Planned income can be deleted, while
-editing planned income remains blocked pending verification of its posting
-transition. Linked transfer fees are controlled by their transfer and cannot
+A future date creates a planned entry using the browser's local calendar date.
+Closing the app across its due date does not post it. History keeps due entries
+marked Overdue until the user chooses Log. Expense logging asks for confirmation;
+income logging asks for the actual positive amount. A still-future plan logs with
+today's date, while a due or overdue plan keeps its scheduled date. Logging
+stores the scheduled amount and clears planned state in the same transaction as
+the stable log receipt.
+
+Editing a planned entry preserves its planned state while it remains due or
+overdue. Moving a future plan to today or earlier posts it; moving a posted entry
+to the future makes it planned. Deleting a planned entry has no balance effect.
+Editing or deleting a posted entry changes its derived balance through the saved
+row. Edits, deletes, and logs write their receipts atomically with the ledger
+change. Editing can move a transaction only between accounts with the same
+currency. Linked transfer fees remain controlled by their transfer and cannot
 be edited or deleted as ordinary expenses.
 
 ## Backup contract
 
 Exports use a JSON envelope with `format: "kuwi.backup"`, backup `version: 1`,
-`schemaVersion: 8`, an ISO `exportedAt`, and an integrity object with
+`schemaVersion: 9`, an ISO `exportedAt`, and an integrity object with
 `algorithm: "SHA-256"` and a lowercase digest. The digest covers the canonical
 JSON form of `format`, `version`, `schemaVersion`, and `data`. Object keys are
 sorted recursively before hashing, and array order is retained.
 
-Current v8 data includes currencies, profiles, accounts, adjustments, setup,
-pending account operations, expense categories and records, pending expense
-sync markers, income categories and records, pending income sync markers,
-transfers with both minor-unit amounts and their rate, pending transfer
-operations, transaction edit/delete receipts, canonical budget definitions,
+Current v9 data includes currencies, profiles, accounts, adjustments, setup,
+pending account operations, expense categories and records, planned flags and
+scheduled amounts, pending expense sync markers, income categories and records,
+planned flags and scheduled amounts, pending income sync markers, transfers
+with source and received minor-unit amounts and their rate, pending transfer
+operations, transaction edit/delete/log receipts, canonical budget definitions,
 and pending budget operation receipts.
 The exported `fee_amount_minor` is derived from the linked fee expense. Joined
 labels and balances are also derived.
@@ -113,9 +128,12 @@ labels and balances are also derived.
 Restore accepts v3 backups without income or transfer relations, v4 backups
 from income-only and transfer-only builds, v4 backups containing both feature
 sets, v5 backups with transaction receipts, v6 backups with transfer data, and
-both v7 layouts. Older backups gain empty budget relations. Budget-only v7
-backups gain same-currency transfer amounts and rate `1`; currency-aware v7
-backups retain their recorded amounts and rates. It checks
+both v7 layouts. Version 8 backups with the current relation set are accepted
+in either populated shape: currency-aware transfer rows without planned
+amounts, or planned rows without currency-aware transfer fields. Older backups
+gain empty budget relations. Budget-only v7 and planned v8 backups gain
+same-currency transfer amounts and rate `1`; currency-aware backups retain
+their recorded amounts and rates. It checks
 the digest, exact relation fields,
 SQLite value constraints, unique keys, and references before replacing data.
 Legacy formats gain canonical empty relations when restored. A transfer backup

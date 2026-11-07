@@ -204,8 +204,9 @@ bounded Kuwi entry.
 For an eligible ordinary income, the store posts only when the date is today or
 earlier and the income is not planned. The balance helper adds income to Debit
 and Asset balances and subtracts it from the amount owed on Credit accounts.
-The inspected code does not establish whether another process changes a
-planned entry to posted when its date arrives.
+The inspected code does not establish an automatic posting process. The
+planned flag remains set through hydration, and the planned list labels due
+entries Overdue for explicit user action.
 The ordinary income form itself exposes Debit and Credit accounts. Its currency
 rounding helper uses the account currency: PHP 12.345 rounds to 12.35 and JPY
 12.5 rounds to 13. As a calculation example, PHP 1,000 plus a same-day income
@@ -435,9 +436,14 @@ operation ID; reusing one with different content fails. Balances are derived
 from transaction rows, so replacing an account or amount changes the old and
 new account balances at the same commit. The UI permits account moves only
 between same-currency accounts and supports category, amount, date, and note
-replacement. It accepts current and past expenses and posted income. Planned
-income edits are blocked pending the separate date-boundary work in ticket #7.
-Transfer editing is outside this ticket.
+replacement. Planned expenses and income remain out of balances and budget
+progress until the user chooses Log. Expense logging asks for confirmation;
+income logging asks for the actual positive amount. A future plan logs with
+today's local date, while a due or overdue plan keeps its scheduled date. The
+logged row retains its scheduled amount. Editing an overdue plan without
+logging leaves it planned; moving a still-future plan to today or earlier posts
+it, and moving a posted entry into the future makes it planned. Transfer
+editing is outside this ticket.
 
 For a derived expense calculation, begin with Debit accounts A = ₱1,000 and B =
 ₱200. Posting a ₱12 expense to A gives A = ₱988. Editing it to ₱20 on B gives A
@@ -446,10 +452,9 @@ to A gives A = ₱1,025. Editing it to ₱35 on B returns A to ₱1,000 and give
 ₱235. Deleting it returns B to ₱200. These are arithmetic examples from the
 traced balance rules, not observed Tarsi runs.
 
-The edit/delete trace establishes the shipped web store paths only. It does not
-confirm iPhone behavior, transfer corrections, cross-currency replacement, or
-how future-dated income changes from planned to posted. Those remain explicit
-acceptance blockers.
+The edit/delete and planned-entry traces establish the shipped web store paths
+only. They do not confirm iPhone behavior, transfer corrections, or
+cross-currency replacement. Those remain explicit acceptance blockers.
 
 ## Cross-currency transfers
 

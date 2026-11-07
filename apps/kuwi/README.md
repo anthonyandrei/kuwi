@@ -3,10 +3,10 @@
 The local finance app is separate from the disposable storage probe. It uses
 Expo, React Native Web, Expo Router, Reanimated, and the supplied quokka
 reference with cream and sage colors. It supports local setup, accounts,
-expenses, ordinary income, offline cross-currency transfers, category budgets,
-and versioned backup/restore. Transaction history supports editing or deleting
-posted expenses and income; planned-income editing remains blocked pending
-rule verification. Local use requires no sign-in.
+expenses, income, planned entries, offline cross-currency transfers, category
+budgets, and versioned backup/restore. Transaction history supports editing and
+deleting entries, with an explicit Log action for planned expenses and income.
+Local use requires no sign-in.
 
 From the repository root:
 
@@ -70,25 +70,26 @@ separate stores.
 
 The strict SQLite schema normalizes currencies, profiles, accounts, setup,
 adjustments, categories, expenses, incomes, transfers, budgets, and pending
-operations. Balances and budget progress derive from canonical records rather
-than stored totals. Transfer principal is excluded from spending; its linked
-fee expense counts once. Setup, finance writes, budget saves or clears, and
-their pending operation records commit atomically. Stable operation IDs let a
-retry find the committed change or reject changed content under the same ID.
+operations. Planned entries stay out of balances and budget progress until
+they are logged. Balances and budget progress derive from canonical records
+rather than stored totals. Transfer principal is excluded from spending; its
+linked fee expense counts once. Setup, finance writes, budget saves or clears,
+and their pending operation records commit atomically. Stable operation IDs let
+a retry find the committed change or reject changed content under the same ID.
 A missing save reply terminates the worker after 15 seconds so a retry can
 check whether the write committed. Schema versions and migration paths are
 documented in [local finance storage](../../docs/finance-storage.md). Local use
 has no Clerk or Convex dependency.
 
-The recovered budget and transfer rules come from static Tarsi WEB code. Tarsi
-iPhone 2.5.9 acceptance remains pending. Kuwi's budget screen covers built-in expense
-categories; custom and hidden categories, subcategory budgets, and Pro
-entitlements are outside the current app. Cross-currency progress stays
-unavailable because Kuwi has no exchange-quote source. Monthly periods start
-on day 1; Kuwi does not expose the WEB reference's configurable start day. A
-real-persistence budget journey passes in Chromium and disk-backed WebKit.
-Physical iPhone acceptance for transfers, budget screens and calculations, and
-backup round trips remains pending.
+The recovered planned-entry, budget, and transfer rules come from static Tarsi
+WEB code. Kuwi keeps future-dated entries planned across reopening and requires
+an explicit Log action. Tarsi iPhone 2.5.9 acceptance remains pending. Kuwi's
+budget screen covers built-in expense categories; custom and hidden categories,
+subcategory budgets, and Pro entitlements are outside the current app.
+Cross-currency progress stays unavailable because Kuwi has no exchange-quote
+source. Monthly periods start on day 1; Kuwi does not expose the WEB reference's
+configurable start day. Physical iPhone acceptance for planned entries,
+transfers, budgets, and backup round trips remains pending.
 
 The six observed currency tiles are PHP, USD, EUR, GBP, JPY, and TWD. PHP, Cash,
 and zero are the defaults. JPY uses whole units; the other enabled currencies
@@ -131,19 +132,20 @@ No Cloudflare product deployment or storage migration was needed.
 ## Validation on 2026-11-08
 
 `npm exec --yes --package=pnpm@11.25.0 -- pnpm check` passed lint, TypeScript,
-the static build, ten unit tests, and 138 Playwright journeys against real OPFS
-storage: 69 in Chromium and 69 in disk-backed WebKit. WebKit retained OPFS data
-for the same origin after a persistent context closed and a second profile
-opened. Each journey uses a unique `.localhost` hostname so a reused port
-cannot expose another journey's database.
+the static build, ten unit tests, and 156 Playwright journeys: 78 in Chromium
+and 78 in disk-backed WebKit. WebKit retained OPFS data for the same origin
+after a persistent context closed and a second profile opened. Each journey
+uses a unique `.localhost` hostname so a reused port cannot expose another
+journey's database.
 
-Coverage includes both v7-to-v8 migration layouts, manual cross-currency rate
-and received-amount entry, currency-specific history and balances, transfer
-backup validation, exact retries after a lost reply, atomic failure recovery,
-and budget progress with a foreign-currency destination. The wider suite checks
-income posting, transaction corrections and deletion, legacy backup restore,
-and offline writes. Physical iPhone acceptance for transfers, budgets, income,
-and Files backup export and restore remains pending.
+Coverage includes both v7-to-v8 migration layouts and both populated v8-to-v9
+layouts, planned-entry logging and date rules, overdue edits and deletion,
+backup validation, retries and rollback, and offline reopening. Cross-currency
+checks preserve source and received minor-unit amounts, canonical decimal
+rates, transfer receipts, and budget definitions. The verified WEB rules for
+planned entries are accepted for this stage. Physical iPhone acceptance for
+planned entries, transfers, budgets, income, and Files backup export and restore
+remains pending.
 
 Physical iPhone installation, offline reopening, and populated Safari ownership
 handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2

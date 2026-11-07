@@ -15,9 +15,9 @@ const test = base.extend({
   baseURL: async ({ storageFault }, provide) => {
     const server = startServer(0, (path, bytes) => {
       if (path !== "/db-worker.js" || !storageFault.current) return bytes;
+      let source = bytes.toString();
       const fault = storageFault.current;
       storageFault.current = null;
-      let source = bytes.toString();
       if (fault === "budget-outbox")
         source = source.replace(
           /db\.exec\(\{\s*sql: "INSERT INTO pending_budget_operations/,
@@ -107,6 +107,11 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
   try {
     let page = await context.newPage();
     await finishSetup(page);
+    const futureDate = await page.evaluate(() => {
+      const date = new Date();
+      date.setDate(date.getDate() + 1);
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    });
 
     await openBudgets(page);
     await setFixedBudget(page, "Food", "1000");
@@ -130,6 +135,17 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await page.getByLabel("Transaction amount", { exact: true }).fill("20");
     await page.getByRole("button", { name: "Save changes", exact: true }).click();
     await page.getByRole("button", { name: "Back to account", exact: true }).click();
+    await page.getByRole("button", { name: "Add expense", exact: true }).click();
+    await page.getByLabel("Expense amount", { exact: true }).fill("5000");
+    await page.getByLabel("Expense date", { exact: true }).fill(futureDate);
+    await page.getByLabel("Expense note", { exact: true }).fill("Future rent");
+    await page.getByRole("button", { name: "Food", exact: true }).click();
+    await page.getByRole("button", { name: "Save expense", exact: true }).click();
+    await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+    await expect(page.getByText("Future rent", { exact: true })).toBeVisible();
+    await expect(page.getByText("Planned", { exact: false })).toHaveCount(1);
+    await expect(page.getByText("₱1,480.00", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to account", exact: true }).click();
     await openBudgets(page);
     await expect(page.getByText("2% used")).toBeVisible();
     await expect(page.getByText("₱980.00 remaining")).toBeVisible();
@@ -147,6 +163,13 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await page.getByLabel("Exchange rate", { exact: true }).fill("0.018");
     await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
     await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+    await expect(page.getByText("₱1,375.00", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Add income", exact: true }).click();
+    await page.getByLabel("Income amount", { exact: true }).fill("20000");
+    await page.getByLabel("Income date", { exact: true }).fill(futureDate);
+    await page.getByLabel("Income note", { exact: true }).fill("Future bonus");
+    await page.getByRole("button", { name: "Salary", exact: true }).click();
+    await page.getByRole("button", { name: "Save income", exact: true }).click();
     await expect(page.getByText("₱1,375.00", { exact: true })).toBeVisible();
 
     await openBudgets(page);
@@ -184,7 +207,7 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
     const download = await downloadPromise;
     const backup = JSON.parse(await readFile(await download.path(), "utf8"));
-    expect(backup.schemaVersion).toBe(8);
+    expect(backup.schemaVersion).toBe(9);
     expect(backup.data.budgets).toHaveLength(3);
     expect(backup.data.pendingBudgetOperations).toHaveLength(4);
     expect(backup.data.budgets.find(({ category_id }) => category_id === "food")).toMatchObject({

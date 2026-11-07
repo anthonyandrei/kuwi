@@ -51,15 +51,15 @@ Credit accounts; the recovered income form does not offer Assets accounts.
 | `setup` | `id` (fixed at 1) | `profile_id` → `profiles.id`, `first_account_id` → `accounts.id`, `completed_at`. |
 | `pending_operations` | `id` | `account_id` → `accounts.id`, `operation_type`, SHA-256 `request_fingerprint`, `created_at`. |
 | `categories` | `id` | Canonical label and display order for built-in expense categories. |
-| `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, optional `transfer_id` → `transfers.id`, positive minor units, date, optional note, `created_at`. |
+| `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, optional `transfer_id` → `transfers.id`, positive minor units, date, optional note, planned flag, optional scheduled amount, `created_at`. |
 | `pending_sync_operations` | `operation_id` | `operation_id` → `expenses.id`; marks an expense creation for local sync. |
 | `income_categories` | `id` | Canonical label and display order for built-in income categories. |
-| `incomes` | `id` | `account_id` → `accounts.id`, optional `category_id` → `income_categories.id`, nonnegative minor units, date, optional note, planned flag, `created_at`. |
+| `incomes` | `id` | `account_id` → `accounts.id`, optional `category_id` → `income_categories.id`, nonnegative minor units, date, optional note, planned flag, optional scheduled amount, `created_at`. |
 | `pending_income_sync_operations` | `operation_id` | `operation_id` → `incomes.id`; marks an income creation for local sync. |
 | `transfers` | `id` | Account references, positive source principal and received amount in their respective minor units, canonical parsed rate, date, optional note, `created_at`. |
 | `expenses.transfer_id` | nullable foreign key | `transfer_id` → `transfers.id`; identifies the linked transfer-fee expense. The fee amount and category are stored on the expense. |
 | `pending_transfer_operations` | `operation_id` | `operation_id` → `transfers.id`, SHA-256 request fingerprint; marks the transfer for local sync and stable retries. |
-| `pending_transaction_operations` | `operation_id` | Transaction kind and ID, edit/delete type, request fingerprint, and creation time. Delete receipts retain IDs after their transaction row is removed. |
+| `pending_transaction_operations` | `operation_id` | Transaction kind and ID, edit/delete/log type, request fingerprint, and creation time. Delete receipts retain IDs after their transaction row is removed. |
 | `budgets` | `category_id` | One normalized definition per expense category: fixed amount or percentage basis points, interval, optional rollover tracking, and optional bi-weekly anchor dates. |
 | `pending_budget_operations` | `operation_id` | Category ID, save/clear type, SHA-256 request fingerprint, and creation time for stable retries and future local sync. |
 
@@ -68,11 +68,11 @@ name, preferred currency`, `account id → name, type, currency, credit limit,
 creation time`, `adjustment id → account id, amount, kind, creation time`,
 `operation id → account id, operation type, request fingerprint, creation
 time`, `category id → label, display order`, `expense id → account, category,
-optional transfer reference, amount, date, note, creation time`, and
-`income id → account, optional category, amount, date, note, planned state,
-creation time`. Transaction
-operation IDs determine the kind, transaction ID, edit/delete type, fingerprint,
-and creation time. This relation has no foreign key because delete receipts must
+optional transfer reference, amount, date, note, planned state, scheduled amount,
+creation time`, and `income id → account, optional category, amount, date, note,
+planned state, scheduled amount, creation time`. Transaction operation IDs
+determine the kind, transaction ID, edit/delete/log type, fingerprint, and
+creation time. This relation has no foreign key because delete receipts must
 outlive their transaction rows. `setup.id` identifies one profile and its first
 account.
 
@@ -152,12 +152,14 @@ Version 5 adds transaction edit/delete receipts. Version 6 adds transfers,
 linked fee references on expenses, and pending transfer operations. The two v7
 layouts reflect separate schema histories: one adds received-currency minor
 units and the canonical parsed exchange-rate string; the other adds normalized
-category budgets and pending budget operation receipts. Version 8 combines
-both layouts. Opening either v7 layout adds only the missing relations or
-transfer columns, then advances to v8. Existing same-currency transfers receive
-equal source and received amounts and rate `1`. Migrations run transactionally
-and preserve populated stores if a backfill fails. Transfer fees stay as
-linked expenses, and transfer principal remains a separate ledger fact.
+category budgets and pending budget operation receipts. Version 8 combines both
+layouts. Version 9 reconciles the two populated v8 shapes by adding only missing
+planned or transfer columns and widening old transaction receipts to accept
+`log`. Existing same-currency transfers receive
+equal source and received amounts and rate `1`; existing currency-aware values
+remain unchanged. Migrations run transactionally and preserve populated stores
+if a backfill fails. Transfer fees stay as linked expenses, and transfer
+principal remains a separate ledger fact.
 
 The adjustment table currently accepts initial balances only. Manual balance
 adjustments, account deletion, loan schedules, investments, and cloud-sync

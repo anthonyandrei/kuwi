@@ -809,7 +809,7 @@ test("an expense increases the amount owed on a credit account", async ({
   await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
 });
 
-test("expense validation rejects zero and dates after today", async ({ page }) => {
+test("expense validation rejects zero and allows a future planned expense", async ({ page }) => {
   await fundedSetup(page);
   await page.getByRole("button", { name: "Add expense", exact: true }).click();
   await page.getByLabel("Expense amount", { exact: true }).fill("0");
@@ -818,8 +818,12 @@ test("expense validation rejects zero and dates after today", async ({ page }) =
 
   await page.getByLabel("Expense amount", { exact: true }).fill("1");
   await page.getByLabel("Expense date", { exact: true }).fill("2099-01-01");
+  await page.getByLabel("Expense note", { exact: true }).fill("Future expense");
   await page.getByRole("button", { name: "Save expense", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("today or an earlier date");
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Future expense", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Log Future expense", exact: true })).toBeVisible();
 });
 
 test("failed expense write leaves history and balance unchanged before retry", async ({

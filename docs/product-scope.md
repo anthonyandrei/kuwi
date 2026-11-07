@@ -89,9 +89,9 @@ The investigation now uses a CLI fallback; see
 
 ## Current implementation
 
-The app in `apps/kuwi` implements local onboarding, accounts, expenses,
-ordinary income, offline cross-currency transfers, category budgets, and
-backup/restore. Recovered Tarsi budget and transfer rules come from static web
+The app in `apps/kuwi` implements local onboarding, accounts, expenses, income,
+planned transaction logging, offline cross-currency transfers, category budgets,
+and backup/restore. Recovered Tarsi budget and transfer rules come from static web
 code. Browser validation passes in Chromium and disk-backed WebKit. iPhone
 acceptance for finance workflows remains pending. Anthony selected Vercel and
 authorized deployment on 2026-11-07. The deployed app is https://kuwi-ten.vercel.app.

@@ -32,6 +32,7 @@ export type TransactionRecord = {
   note: string | null;
   created_at: string;
   planned: number;
+  planned_amount_minor: number | null;
   transfer_id: string | null;
 };
 export type TransactionLedger = {
@@ -110,6 +111,7 @@ export type CreateExpenseInput = {
   categoryId: string;
   amountMinor: number;
   date: string;
+  planned?: boolean;
   note?: string;
 };
 export type CreateIncomeInput = {
@@ -118,6 +120,7 @@ export type CreateIncomeInput = {
   categoryId?: string;
   amountMinor: number;
   date: string;
+  planned?: boolean;
   note?: string;
 };
 export type CreateTransferInput = {
@@ -135,6 +138,7 @@ export type UpdateTransactionInput = {
   operationId: string;
   transactionId: string;
   kind: TransactionRecord["kind"];
+  operationType?: "edit" | "log";
   currentAccountId: string;
   accountId: string;
   categoryId?: string;
@@ -202,6 +206,8 @@ export type BackupExpense = {
   note: string | null;
   created_at: string;
   transfer_id: string | null;
+  planned: number;
+  planned_amount_minor: number | null;
 };
 export type BackupTransfer = {
   id: string;
@@ -226,6 +232,7 @@ export type BackupIncome = {
   date: string;
   note: string | null;
   planned: number;
+  planned_amount_minor: number | null;
   created_at: string;
 };
 export type BackupPendingIncomeSyncOperation = { operation_id: string };
@@ -233,7 +240,7 @@ export type BackupPendingTransactionOperation = {
   operation_id: string;
   transaction_kind: TransactionRecord["kind"];
   transaction_id: string;
-  operation_type: "edit" | "delete";
+  operation_type: "edit" | "delete" | "log";
   request_fingerprint: string;
   created_at: string;
 };
@@ -277,7 +284,7 @@ export type ProductBackupData = {
 export type ProductBackup = {
   format: "kuwi.backup";
   version: 1;
-  schemaVersion: 8;
+  schemaVersion: 9;
   exportedAt: string;
   integrity: { algorithm: "SHA-256"; digest: string };
   data: ProductBackupData;

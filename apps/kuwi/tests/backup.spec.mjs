@@ -101,6 +101,20 @@ function withValidDigest(backup) {
   };
 }
 
+/** Remove fields that were introduced after a legacy backup schema.
+ * @param {object} backup - Candidate backup to downgrade for restoration.
+ * @returns {object} The same backup with its legacy row shape restored.
+ */
+function removePlannedFields(backup) {
+  backup.data.expenses = backup.data.expenses.map(
+    ({ planned, planned_amount_minor, ...expense }) => expense,
+  );
+  backup.data.incomes = backup.data.incomes.map(
+    ({ planned_amount_minor, ...income }) => income,
+  );
+  return backup;
+}
+
 /** Serialize a test backup body with sorted object keys and retained array order.
  * @param {*} value - JSON-compatible test data.
  * @returns {string} Canonical JSON used to form the SHA-256 digest.
@@ -181,7 +195,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     expect(backup).toMatchObject({
       format: "kuwi.backup",
       version: 1,
-      schemaVersion: 8,
+      schemaVersion: 9,
       integrity: { algorithm: "SHA-256" },
       data: {
         profiles: [{ preferred_name: "Anthony", preferred_currency: "PHP" }],
@@ -228,6 +242,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const sameCurrencyV6Backup = structuredClone(backup);
     sameCurrencyV6Backup.schemaVersion = 6;
+    removePlannedFields(sameCurrencyV6Backup);
     delete sameCurrencyV6Backup.data.budgets;
     delete sameCurrencyV6Backup.data.pendingBudgetOperations;
     sameCurrencyV6Backup.data.transfers = sameCurrencyV6Backup.data.transfers.map(
@@ -242,6 +257,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const currencyV7Backup = structuredClone(backup);
     currencyV7Backup.schemaVersion = 7;
+    removePlannedFields(currencyV7Backup);
     delete currencyV7Backup.data.budgets;
     delete currencyV7Backup.data.pendingBudgetOperations;
     await restoreFile(page, {
@@ -253,6 +269,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const budgetV7Backup = structuredClone(backup);
     budgetV7Backup.schemaVersion = 7;
+    removePlannedFields(budgetV7Backup);
     budgetV7Backup.data.transfers = budgetV7Backup.data.transfers.map(
       ({ received_amount_minor, exchange_rate, ...transfer }) => transfer,
     );
@@ -260,6 +277,33 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       name: "budget-v7.kuwi.json",
       mimeType: "application/json",
       buffer: Buffer.from(JSON.stringify(withValidDigest(budgetV7Backup))),
+    });
+    await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
+
+    const currencyV8Backup = structuredClone(backup);
+    currencyV8Backup.schemaVersion = 8;
+    currencyV8Backup.data.expenses = currencyV8Backup.data.expenses.map(
+      ({ planned, planned_amount_minor, ...expense }) => expense,
+    );
+    currencyV8Backup.data.incomes = currencyV8Backup.data.incomes.map(
+      ({ planned_amount_minor, ...income }) => income,
+    );
+    await restoreFile(page, {
+      name: "currency-v8.kuwi.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(currencyV8Backup))),
+    });
+    await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
+
+    const plannedV8Backup = structuredClone(backup);
+    plannedV8Backup.schemaVersion = 8;
+    plannedV8Backup.data.transfers = plannedV8Backup.data.transfers.map(
+      ({ received_amount_minor, exchange_rate, ...transfer }) => transfer,
+    );
+    await restoreFile(page, {
+      name: "planned-v8.kuwi.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(plannedV8Backup))),
     });
     await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
 
@@ -310,6 +354,23 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     await expect(page.getByRole("alert")).toContainText("transaction operation is orphaned");
     await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
 
+    const orphanedLog = structuredClone(backup);
+    orphanedLog.data.pendingTransactionOperations.push({
+      operation_id: "orphaned-log",
+      transaction_kind: "expense",
+      transaction_id: "missing-transaction",
+      operation_type: "log",
+      request_fingerprint: "a".repeat(64),
+      created_at: "2026-11-08T00:00:00.000Z",
+    });
+    await restoreFile(page, {
+      name: "orphaned-log-receipt.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(orphanedLog))),
+    });
+    await expect(page.getByRole("alert")).toContainText("transaction operation is orphaned");
+    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+
     const duplicateCurrency = structuredClone(backup);
     duplicateCurrency.data.currencies[1] = { ...duplicateCurrency.data.currencies[0] };
     await restoreFile(page, {
@@ -327,7 +388,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       mimeType: "application/json",
       buffer: Buffer.from(JSON.stringify(withValidDigest(futureExpense))),
     });
-    await expect(page.getByRole("alert")).toContainText("expense date is invalid");
+    await expect(page.getByRole("alert")).toContainText("expense date or planned flag is invalid");
     await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
 
     const unsupported = { ...backup, version: 99 };
@@ -341,6 +402,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const incomeOnlyBackup = structuredClone(backup);
     incomeOnlyBackup.schemaVersion = 4;
+    removePlannedFields(incomeOnlyBackup);
     delete incomeOnlyBackup.data.budgets;
     delete incomeOnlyBackup.data.pendingBudgetOperations;
     const linkedFeeIds = new Set(
@@ -363,6 +425,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const transferOnlyBackup = structuredClone(backup);
     transferOnlyBackup.schemaVersion = 4;
+    removePlannedFields(transferOnlyBackup);
     delete transferOnlyBackup.data.budgets;
     delete transferOnlyBackup.data.pendingBudgetOperations;
     transferOnlyBackup.data.transfers = transferOnlyBackup.data.transfers.map(
@@ -381,6 +444,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const v4Backup = structuredClone(backup);
     v4Backup.schemaVersion = 4;
+    removePlannedFields(v4Backup);
     delete v4Backup.data.budgets;
     delete v4Backup.data.pendingBudgetOperations;
     v4Backup.data.transfers = v4Backup.data.transfers.map(
@@ -396,6 +460,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const receiptOnlyV5Backup = structuredClone(backup);
     receiptOnlyV5Backup.schemaVersion = 5;
+    removePlannedFields(receiptOnlyV5Backup);
     delete receiptOnlyV5Backup.data.budgets;
     delete receiptOnlyV5Backup.data.pendingBudgetOperations;
     const v5TransferFeeIds = new Set(
@@ -419,6 +484,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const legacyBackup = structuredClone(backup);
     legacyBackup.schemaVersion = 3;
+    removePlannedFields(legacyBackup);
     delete legacyBackup.data.budgets;
     delete legacyBackup.data.pendingBudgetOperations;
     delete legacyBackup.data.incomeCategories;

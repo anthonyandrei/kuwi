@@ -37,7 +37,7 @@ function formatMoney(minor: number, currency: string, digits: number): string {
 }
 
 /**
- * Render an expense or income form, or history with transaction actions and both transfer amounts.
+ * Render an expense or income form, or history with transfer, edit, delete, and planned-log actions.
  * @param mode - Entry type or history view to show.
  * @param ledger - Selected account, all account balances, canonical categories, transactions, and transfers.
  * @param onBack - Return to the selected account screen.
@@ -64,51 +64,63 @@ export function TransactionWorkspace({
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<TransactionRecord | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<TransactionRecord | null>(null);
+  const [confirmingLog, setConfirmingLog] = useState<TransactionRecord | null>(null);
+  const [loggingIncome, setLoggingIncome] = useState<TransactionRecord | null>(null);
+  const [actualIncomeAmount, setActualIncomeAmount] = useState("");
   const [accountId, setAccountId] = useState(ledger.account.id);
-  const operationAttempt = useRef<{ key: string; operationId: string } | null>(null);
+  const operationAttempt = useRef<{
+    key: string;
+    operationId: string;
+    planned?: boolean;
+    plannedDate?: string;
+  } | null>(null);
   const { account } = ledger;
   const activeAccount = ledger.accounts.find((candidate) => candidate.id === accountId) ?? account;
   const currency = activeAccount.currency_code;
   const today = getLocalDate();
 
-  /** Keep one mutation ID until its logical action succeeds.
-   * @param key - Serialized operation type and target transaction identity.
+  /** Keep one mutation ID and initial planned intent until its logical action succeeds.
+   * @param key - Serialized action type and create mode or transaction identity.
+   * @param planned - Whether this create attempt started as a future-dated plan.
+   * @param plannedDate - Date tied to that captured planned intent.
    * @returns The ID already associated with this action, or a new random ID.
    */
-  function operationIdFor(key: string): string {
+  function operationIdFor(key: string, planned?: boolean, plannedDate?: string): string {
     if (!operationAttempt.current || operationAttempt.current.key !== key)
-      operationAttempt.current = { key, operationId: crypto.randomUUID() };
+      operationAttempt.current = {
+        key,
+        operationId: crypto.randomUUID(),
+        planned,
+        plannedDate,
+      };
     return operationAttempt.current.operationId;
   }
 
   /**
    * Validate and create or replace the selected entry with a stable retry ID.
-   * A failed write keeps the form values and displays the error for another attempt.
+   * A failed write keeps the form values and original planned intent for another attempt.
    * @returns Resolves after applying the result or displaying validation/storage errors.
    */
   async function submitTransaction() {
     const isIncome = (editing?.kind ?? mode) === "income";
     const isEditing = editing !== null;
-    if (editing && isIncome && (editing.planned || date > today)) {
-      setError("Planned income editing is unavailable until planned-entry rules are verified.");
-      return;
-    }
     const dateError = isIncome
       ? validateIncomeDate(date)
-      : validateExpenseDate(date, today);
+      : validateExpenseDate(date);
     if (dateError) {
       setError(dateError);
       return;
     }
 
-    const isFutureIncome = isIncome && date > today;
+    const isPlannedIncome = isIncome && (date > today ||
+      (editing?.planned === 1 && editing.date <= today));
     const amountMinor = isIncome
-      ? parseIncomeAmount(amount, activeAccount.decimal_places, isFutureIncome)
+      ? parseIncomeAmount(amount, activeAccount.decimal_places, isPlannedIncome)
       : parseExpenseAmount(amount, activeAccount.decimal_places);
     if (amountMinor === null) {
       setError(
         isIncome
-          ? "Enter a valid income amount. Current and past entries must be greater than zero."
+          ? "Enter a valid income amount. Planned income may be zero; posted income must be greater than zero."
           : "Enter an expense amount greater than zero.",
       );
       return;
@@ -142,10 +154,15 @@ export function TransactionWorkspace({
           date,
           note: note.trim() || undefined,
         };
-        const operationId = operationIdFor(JSON.stringify(["create", mode]));
+        const key = JSON.stringify(["create", mode]);
+        const plannedForAttempt = date > getLocalDate();
+        const operationId = operationIdFor(key, plannedForAttempt, date);
+        const planned = operationAttempt.current?.plannedDate === date
+          ? operationAttempt.current.planned ?? plannedForAttempt
+          : plannedForAttempt;
         const result = isIncome
-          ? await saveIncome({ operationId, ...request })
-          : await saveExpense({ operationId, ...request, categoryId: categoryId || "other" });
+          ? await saveIncome({ operationId, ...request, planned })
+          : await saveExpense({ operationId, ...request, categoryId: categoryId || "other", planned });
         onLedgerChange(result.ledger);
         operationAttempt.current = null;
         setStatus("");
@@ -160,6 +177,60 @@ export function TransactionWorkspace({
     } finally {
       setSaving(false);
     }
+  }
+
+  /** Log one planned entry with an id that stays fixed when the write needs retrying.
+   * @param transaction - Planned transaction selected from history.
+   * @param actualAmountMinor - Positive income amount in minor units; omitted for expenses.
+   * @returns Resolves after the post or displays validation and storage errors.
+   */
+  async function logPlanned(transaction: TransactionRecord, actualAmountMinor?: number) {
+    const request = {
+      operationType: "log" as const,
+      transactionId: transaction.id,
+      kind: transaction.kind,
+      currentAccountId: account.id,
+      accountId: transaction.account_id,
+      categoryId: transaction.category_id ?? undefined,
+      amountMinor: transaction.kind === "expense" ? transaction.amount_minor : actualAmountMinor,
+      date: transaction.date,
+      note: transaction.note ?? undefined,
+    };
+    if (!Number.isSafeInteger(request.amountMinor) || request.amountMinor! <= 0) {
+      setError("Enter an income amount greater than zero.");
+      return;
+    }
+    setError("");
+    setSaving(true);
+    try {
+      const operationId = operationIdFor(JSON.stringify(["log", request.kind, request.transactionId]));
+      const result = await updateTransaction({ operationId, ...request, amountMinor: request.amountMinor! });
+      onLedgerChange(result.ledger);
+      operationAttempt.current = null;
+      setConfirmingLog(null);
+      setLoggingIncome(null);
+      setActualIncomeAmount("");
+      setStatus(`${transaction.kind === "income" ? "Income" : "Expense"} logged.`);
+    } catch (failure) {
+      setError((failure as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** Validate the actual amount entered for planned income and start its log request.
+   * Empty or invalid amounts leave the prompt open with an error.
+   * @returns {void} Starts the asynchronous log operation when the amount is valid.
+   */
+  function confirmIncomeLog() {
+    if (!loggingIncome) return;
+    const originalAccount = ledger.accounts.find((candidate) => candidate.id === loggingIncome.account_id) ?? account;
+    const amountMinor = parseIncomeAmount(actualIncomeAmount, originalAccount.decimal_places, false);
+    if (amountMinor === null) {
+      setError("Enter an income amount greater than zero.");
+      return;
+    }
+    void logPlanned(loggingIncome, amountMinor);
   }
 
   /** Delete the confirmed history row using one stable operation ID across retries.
@@ -277,7 +348,9 @@ export function TransactionWorkspace({
                       </Text>
                       <Text style={styles.meta}>
                         {categoryLabel} · {transaction.date} · {account.name}
-                        {transaction.planned ? " · Planned" : ""}
+                        {transaction.planned
+                          ? transaction.date < today ? " · Overdue" : " · Planned"
+                          : ""}
                       </Text>
                     </View>
                     <Text
@@ -292,18 +365,31 @@ export function TransactionWorkspace({
                   </View>
                   {transaction.transfer_id ? null : (
                     <View style={styles.entryActions}>
-                      {transaction.kind === "income" && transaction.planned ? (
-                        <Text style={styles.meta}>Planned income editing is unavailable.</Text>
-                      ) : (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Edit ${transaction.note || categoryLabel}`}
+                        onPress={() => editTransaction(transaction)}
+                        style={styles.actionButton}
+                      >
+                        <Text style={styles.actionText}>Edit</Text>
+                      </Pressable>
+                      {transaction.planned ? (
                         <Pressable
                           accessibilityRole="button"
-                          accessibilityLabel={`Edit ${transaction.note || categoryLabel}`}
-                          onPress={() => editTransaction(transaction)}
+                          accessibilityLabel={`Log ${transaction.note || categoryLabel}`}
+                          onPress={() => {
+                            setError("");
+                            setStatus("");
+                            if (transaction.kind === "income") {
+                              setLoggingIncome(transaction);
+                              setActualIncomeAmount("");
+                            } else setConfirmingLog(transaction);
+                          }}
                           style={styles.actionButton}
                         >
-                          <Text style={styles.actionText}>Edit</Text>
+                          <Text style={styles.actionText}>Log</Text>
                         </Pressable>
-                      )}
+                      ) : null}
                       <Pressable
                         accessibilityRole="button"
                         accessibilityLabel={`Delete ${transaction.note || categoryLabel}`}
@@ -371,6 +457,42 @@ export function TransactionWorkspace({
               </Pressable>
               <Pressable accessibilityRole="button" disabled={saving} onPress={() => void confirmDelete()} style={styles.deleteButton}>
                 <Text style={styles.deleteText}>{saving ? "Deleting…" : "Confirm delete"}</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+        {confirmingLog ? (
+          <View style={styles.confirmation}>
+            <Text style={styles.label}>Log this expense?</Text>
+            <Text style={styles.copy}>The expense will use {confirmingLog.date > today ? "today's date" : "its scheduled date"} and change the account balance.</Text>
+            <View style={styles.entryActions}>
+              <Pressable accessibilityRole="button" onPress={() => setConfirmingLog(null)} style={styles.actionButton}>
+                <Text style={styles.actionText}>Cancel log</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" disabled={saving} onPress={() => void logPlanned(confirmingLog)} style={styles.saveButton}>
+                <Text style={styles.saveText}>{saving ? "Logging…" : "Confirm log expense"}</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
+        {loggingIncome ? (
+          <View style={styles.confirmation}>
+            <Text style={styles.label}>Actual income amount ({currency})</Text>
+            <Text style={styles.copy}>The income will use {loggingIncome.date > today ? "today's date" : "its scheduled date"}.</Text>
+            <TextInput
+              accessibilityLabel="Actual income amount"
+              value={actualIncomeAmount}
+              onChangeText={setActualIncomeAmount}
+              keyboardType="decimal-pad"
+              placeholder="0"
+              style={styles.input}
+            />
+            <View style={styles.entryActions}>
+              <Pressable accessibilityRole="button" onPress={() => setLoggingIncome(null)} style={styles.actionButton}>
+                <Text style={styles.actionText}>Cancel log</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" disabled={saving} onPress={confirmIncomeLog} style={styles.saveButton}>
+                <Text style={styles.saveText}>{saving ? "Logging…" : "Confirm log income"}</Text>
               </Pressable>
             </View>
           </View>
@@ -464,7 +586,6 @@ export function TransactionWorkspace({
         "aria-label": isIncome ? "Income date" : "Expense date",
         type: "date",
         value: date,
-        ...(isIncome ? {} : { max: today }),
         onChange: (event: { currentTarget: { value: string } }) =>
           setDate(event.currentTarget.value),
         style: {
@@ -498,8 +619,8 @@ export function TransactionWorkspace({
       </Pressable>
       <Text style={styles.hint}>
         {isIncome
-          ? "Future-dated income is planned and does not change the balance."
-          : "Choose today or an earlier date."}
+          ? "Future-dated income stays planned and does not change the balance until you log it."
+          : "Future-dated expenses stay planned and do not change the balance until you log them."}
       </Text>
     </View>
   );

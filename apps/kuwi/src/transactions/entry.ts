@@ -40,16 +40,12 @@ export function parseIncomeAmount(
 }
 
 /**
- * Validate a real date-only value and reject dates after the supplied local date.
+ * Validate a real date-only value for an expense, including a future planned date.
  * @param value - Expense date in YYYY-MM-DD form.
- * @param today - Current browser-local date in YYYY-MM-DD form.
  * @returns A user-facing validation message, or null when the date is allowed.
  */
-export function validateExpenseDate(value: string, today: string): string | null {
-  if (!isValidDate(value))
-    return "Choose a valid expense date.";
-  if (value > today) return "Choose today or an earlier date.";
-  return null;
+export function validateExpenseDate(value: string): string | null {
+  return isValidDate(value) ? null : "Choose a valid expense date.";
 }
 
 /**
