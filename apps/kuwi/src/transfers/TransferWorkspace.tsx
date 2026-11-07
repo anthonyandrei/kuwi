@@ -23,7 +23,12 @@ import {
 const ink = "#293c32";
 const sage = "#486b51";
 
-/** Format integer minor units with the precision of the referenced currency. */
+/** Format a currency's integer minor units for the transfer form.
+ * @param minor - Amount stored in the referenced currency's minor units.
+ * @param currency - Currency code used for the localized symbol and formatting.
+ * @param digits - Decimal places used by that currency.
+ * @returns The localized amount.
+ */
 function formatMoney(minor: number, currency: string, digits: number): string {
   return new Intl.NumberFormat("en-PH", {
     style: "currency",
@@ -33,11 +38,12 @@ function formatMoney(minor: number, currency: string, digits: number): string {
   }).format(minor / 10 ** digits);
 }
 
-/** Render editable offline transfer details and preserve one command ID across unchanged retries.
- * @param accounts - Current local accounts with ledger-derived balances and currency precision.
+/** Render an offline transfer form and preserve one command ID across unchanged retries.
+ * @param accounts - Local accounts with ledger-derived balances and currency precision.
  * @param initialAccount - Account selected before opening this workspace.
  * @param onBack - Return without changing the ledger.
  * @param onTransfer - Publish the atomic result after storage confirms the save.
+ * @returns The transfer form with eligible destinations, conversion entry, and source fee.
  */
 export function TransferWorkspace({
   accounts,
@@ -103,7 +109,11 @@ export function TransferWorkspace({
       : Math.max(0, selectedSource.balance_minor)
     : 0;
 
-  /** Format a minor-unit amount for an editable decimal input without rounding. */
+  /** Format stored minor units for a decimal input without rounding.
+   * @param minor - Amount in the selected currency's minor units.
+   * @param digits - Decimal places used by the selected currency.
+   * @returns A decimal string suitable for the received-amount field.
+   */
   function minorText(minor: number, digits: number): string {
     const scale = 10 ** digits;
     const whole = Math.floor(minor / scale).toString();
@@ -111,13 +121,18 @@ export function TransferWorkspace({
     return `${whole}.${(minor % scale).toString().padStart(digits, "0")}`;
   }
 
-  /** Strip unsupported exchange-rate characters while leaving fractional precision unlimited. */
+  /** Strip unsupported rate characters while keeping all entered fractional digits.
+   * @param value - Raw rate field text.
+   * @returns Numeric text containing at most one decimal point.
+   */
   function cleanRateInput(value: string): string {
     const pieces = value.replace(/[^\d.]/g, "").split(".");
     return pieces.length > 1 ? `${pieces[0] || "0"}.${pieces.slice(1).join("")}` : pieces[0];
   }
 
-  /** Validate and submit one operation with a stable ID for identical retries. */
+  /** Validate and submit one operation with a stable ID for identical retries.
+   * @returns Resolves after showing validation/storage feedback or publishing a saved transfer.
+   */
   async function submitTransfer() {
     if (!selectedSource || !selectedDestination) {
       setError("Add an eligible debit account to receive this transfer.");

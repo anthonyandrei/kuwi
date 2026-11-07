@@ -1,6 +1,6 @@
 # Local finance storage
 
-Kuwi stores account and transaction facts in strict SQLite tables in OPFS. It
+Kuwi stores account, transaction, and budget facts in strict SQLite tables in OPFS. It
 uses ordered `PRAGMA user_version` migrations and derives balances from ledger
 rows rather than keeping a mutable balance copy.
 
@@ -14,20 +14,25 @@ Version 3 adds expense categories, expenses, pending sync markers, and an
 account/date index. Version 4 adds income categories, incomes, pending income
 sync markers, and an account/date index. Version 5 adds transaction
 edit/delete receipts. Version 6 adds transfers, linked fee references on
-expenses, and pending transfer operations. Version 7 adds destination minor
-units and the canonical parsed exchange-rate string.
+expenses, and pending transfer operations. Version 7 adds currency-aware
+received amounts and canonical parsed exchange rates to transfers. Version 8
+adds category budgets and pending budget operation receipts.
 
-A new database builds through versions 2, 3, 4, 5, 6, and 7. Older stores run
-the migrations they still need. Each migration commits in its own transaction.
-A failed step keeps its starting schema and data for a retry.
+Some existing v7 stores have currency-aware transfers, while others have
+budgets with same-currency transfers. Opening either layout idempotently applies
+the missing migration and advances the store to v8. Each migration commits in
+its own transaction. A failed step keeps its starting schema and data for a
+retry.
 
 The v6 migration supports both earlier v4 layouts. Income-only v4 databases
 receive transfer relations, and v4 databases that already contain transfers
 keep their transfer data. It also upgrades v5 databases that already have
 transaction receipts. Populated v4 and v5 fixtures check account, expense,
-income, and sync marker identities after upgrade. Version 7 backfills each
-existing same-currency transfer with an equal received amount and rate `1`.
-The migration rolls back its schema changes and data updates together on failure.
+income, and sync marker identities after upgrade. The currency migration
+backfills each existing same-currency transfer with an equal received amount
+and rate `1`. It backfills only when the received-amount column is absent, so
+reopening a currency-aware store preserves recorded values. Schema and data
+changes roll back together on failure.
 
 ## Ledger writes and balances
 
@@ -50,6 +55,26 @@ an expense in the Fees category and references the transfer ID. The fee name is
 `Bank transfer fee to <destination>`. The transfer uses the selected date,
 including future dates, and affects balances immediately.
 
+Budgets store one definition per expense category. A fixed amount uses
+thousandths of the preferred currency unit; a percentage uses integer
+hundredths of a percent and derives its limit from actual income in the same
+interval. Saving zero clears the definition. Saving or clearing a definition
+and its pending operation receipt share one SQLite transaction. A retry with
+the same operation ID and content returns the committed state; changed content
+under that ID fails. Amount edits preserve a rollover start, while changing
+the interval or bi-weekly anchors starts a new rollover span.
+
+Progress comes from eligible expense and income rows each time it is read.
+Expenses count across accounts by category and inclusive period. Monthly periods
+currently start on day 1; Kuwi does not expose the WEB reference's configurable
+monthly start day. Actual income across all accounts and categories forms the
+percentage base; planned income is excluded. Transfers do not contribute their
+principal to spending. A transfer fee is already stored once as a linked Fees
+expense and counts once when it meets the budget date and eligibility rules.
+Kuwi currently has no FX quote source, so progress is unavailable when
+qualifying expenses or income use a currency different from the profile's
+preferred currency.
+
 The app derives Debit and Assets balances from adjustments, expenses, posted
 income, and transfer principal. Expenses reduce those balances; posted income
 adds to them. Credit expenses increase the amount owed and posted income lowers
@@ -71,23 +96,25 @@ be edited or deleted as ordinary expenses.
 ## Backup contract
 
 Exports use a JSON envelope with `format: "kuwi.backup"`, backup `version: 1`,
-`schemaVersion: 7`, an ISO `exportedAt`, and an integrity object with
+`schemaVersion: 8`, an ISO `exportedAt`, and an integrity object with
 `algorithm: "SHA-256"` and a lowercase digest. The digest covers the canonical
 JSON form of `format`, `version`, `schemaVersion`, and `data`. Object keys are
 sorted recursively before hashing, and array order is retained.
 
-Current v7 data includes currencies, profiles, accounts, adjustments, setup,
+Current v8 data includes currencies, profiles, accounts, adjustments, setup,
 pending account operations, expense categories and records, pending expense
 sync markers, income categories and records, pending income sync markers,
 transfers with both minor-unit amounts and their rate, pending transfer
-operations, and transaction edit/delete receipts.
+operations, transaction edit/delete receipts, canonical budget definitions,
+and pending budget operation receipts.
 The exported `fee_amount_minor` is derived from the linked fee expense. Joined
 labels and balances are also derived.
 
 Restore accepts v3 backups without income or transfer relations, v4 backups
 from income-only and transfer-only builds, v4 backups containing both feature
-sets, v5 backups with transaction receipts, v6 backups with same-currency
-transfers, and current v7 backups. It checks
+sets, v5 backups with transaction receipts, v6 backups with transfer data, and
+both v7 layouts. Older backups gain empty budget relations. Budget-only v7
+backups gain same-currency transfer amounts and rate `1`. It checks
 the digest, exact relation fields,
 SQLite value constraints, unique keys, and references before replacing data.
 Legacy formats gain canonical empty relations when restored. A transfer backup

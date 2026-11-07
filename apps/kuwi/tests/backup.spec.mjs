@@ -1,5 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
+import { rm } from "node:fs/promises";
 import { test as base, expect, webkit, chromium } from "@playwright/test";
 
 const test = base.extend({
@@ -19,7 +20,9 @@ const test = base.extend({
     });
     await new Promise((resolve) => server.once("listening", resolve));
     try {
-      await provide(`http://127.0.0.1:${server.address().port}`);
+      // WebKit shares OPFS by origin across persistent profiles and test runs.
+      const host = `kuwi-${randomUUID()}.localhost`;
+      await provide(`http://${host}:${server.address().port}`);
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
@@ -30,10 +33,32 @@ const test = base.extend({
 /** Complete visible first-run setup with the independent PHP 1,000 test example.
  * @param {import("@playwright/test").Page} page - Browser page to drive.
  * @returns {Promise<void>} Resolves after the saved balance appears.
+ * @throws {Error} If local storage fails to open before setup starts.
  */
 async function finishSetup(page) {
   await page.goto("/");
-  await page.getByRole("button", { name: "Continue offline", exact: true }).click();
+  const startButton = page.getByRole("button", {
+    name: "Continue offline",
+    exact: true,
+  });
+  const retryButton = page.getByRole("button", {
+    name: "Retry opening",
+    exact: true,
+  });
+  try {
+    await expect(startButton.or(retryButton)).toBeVisible();
+  } catch (error) {
+    const screen = await page.locator("body").innerText().catch(() => "");
+    throw new Error(
+      `App startup did not reach first-run setup. Screen: ${screen || "empty"}. ${error.message}`,
+    );
+  }
+  if (await retryButton.isVisible()) {
+    throw new Error(
+      `Local storage failed to open. Screen: ${await page.locator("body").innerText()}`,
+    );
+  }
+  await startButton.click();
   await page.getByLabel("Preferred name", { exact: true }).fill("Anthony");
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await page.getByRole("button", { name: "Skip introduction", exact: true }).click();
@@ -93,6 +118,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 }, testInfo) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
   const directory = testInfo.outputPath("backup-browser-profile");
+  await rm(directory, { recursive: true, force: true });
   let context = await browserType.launchPersistentContext(directory, { baseURL });
   try {
     let page = await context.newPage();
@@ -155,7 +181,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     expect(backup).toMatchObject({
       format: "kuwi.backup",
       version: 1,
-      schemaVersion: 7,
+      schemaVersion: 8,
       integrity: { algorithm: "SHA-256" },
       data: {
         profiles: [{ preferred_name: "Anthony", preferred_currency: "PHP" }],
@@ -202,6 +228,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const sameCurrencyV6Backup = structuredClone(backup);
     sameCurrencyV6Backup.schemaVersion = 6;
+    delete sameCurrencyV6Backup.data.budgets;
+    delete sameCurrencyV6Backup.data.pendingBudgetOperations;
     sameCurrencyV6Backup.data.transfers = sameCurrencyV6Backup.data.transfers.map(
       ({ received_amount_minor, exchange_rate, ...transfer }) => transfer,
     );
@@ -209,6 +237,31 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       name: "same-currency-v6.kuwi.json",
       mimeType: "application/json",
       buffer: Buffer.from(JSON.stringify(withValidDigest(sameCurrencyV6Backup))),
+    });
+    await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+
+    const currencyV7Backup = structuredClone(backup);
+    currencyV7Backup.schemaVersion = 7;
+    delete currencyV7Backup.data.budgets;
+    delete currencyV7Backup.data.pendingBudgetOperations;
+    await restoreFile(page, {
+      name: "currency-v7.kuwi.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(currencyV7Backup))),
+    });
+    await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+
+    const budgetV7Backup = structuredClone(backup);
+    budgetV7Backup.schemaVersion = 7;
+    budgetV7Backup.data.transfers = budgetV7Backup.data.transfers.map(
+      ({ received_amount_minor, exchange_rate, ...transfer }) => transfer,
+    );
+    await restoreFile(page, {
+      name: "budget-v7.kuwi.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(withValidDigest(budgetV7Backup))),
     });
     await expect(page.getByText("₱909.75", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
@@ -291,6 +344,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const incomeOnlyBackup = structuredClone(backup);
     incomeOnlyBackup.schemaVersion = 4;
+    delete incomeOnlyBackup.data.budgets;
+    delete incomeOnlyBackup.data.pendingBudgetOperations;
     const linkedFeeIds = new Set(
       incomeOnlyBackup.data.expenses.filter((expense) => expense.transfer_id).map(({ id }) => id),
     );
@@ -311,6 +366,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const transferOnlyBackup = structuredClone(backup);
     transferOnlyBackup.schemaVersion = 4;
+    delete transferOnlyBackup.data.budgets;
+    delete transferOnlyBackup.data.pendingBudgetOperations;
     delete transferOnlyBackup.data.incomeCategories;
     delete transferOnlyBackup.data.incomes;
     delete transferOnlyBackup.data.pendingIncomeSyncOperations;
@@ -324,6 +381,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const v4Backup = structuredClone(backup);
     v4Backup.schemaVersion = 4;
+    delete v4Backup.data.budgets;
+    delete v4Backup.data.pendingBudgetOperations;
     delete v4Backup.data.pendingTransactionOperations;
     await restoreFile(page, {
       name: "combined-v4.kuwi.json",
@@ -334,6 +393,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const receiptOnlyV5Backup = structuredClone(backup);
     receiptOnlyV5Backup.schemaVersion = 5;
+    delete receiptOnlyV5Backup.data.budgets;
+    delete receiptOnlyV5Backup.data.pendingBudgetOperations;
     const v5TransferFeeIds = new Set(
       receiptOnlyV5Backup.data.expenses
         .filter(({ transfer_id }) => transfer_id)
@@ -355,6 +416,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const legacyBackup = structuredClone(backup);
     legacyBackup.schemaVersion = 3;
+    delete legacyBackup.data.budgets;
+    delete legacyBackup.data.pendingBudgetOperations;
     delete legacyBackup.data.incomeCategories;
     delete legacyBackup.data.incomes;
     delete legacyBackup.data.pendingIncomeSyncOperations;
@@ -453,8 +516,10 @@ test("a failed restore keeps saved transactions and their edit receipts", async 
 }, testInfo) => {
   storageFault.failRestore = true;
   const browserType = browserName === "webkit" ? webkit : chromium;
+  const directory = testInfo.outputPath("failed-backup-browser-profile");
+  await rm(directory, { recursive: true, force: true });
   const context = await browserType.launchPersistentContext(
-    testInfo.outputPath("failed-backup-browser-profile"),
+    directory,
     { baseURL },
   );
   try {

@@ -89,19 +89,21 @@ The investigation now uses a CLI fallback; see
 
 ## Current implementation
 
-The app in `apps/kuwi` implements local setup, accounts, expenses, and ordinary
-income entry with transaction history. Income follows verified shipped-web
-rules; physical iPhone acceptance for this flow is pending. Anthony selected
-Vercel and authorized deployment on 2026-11-07. The deployed app is
-https://kuwi-ten.vercel.app. Browser persistence journeys and HTTPS
-setup/offline checks passed; see [the app README](../apps/kuwi/README.md) for
-coverage and limits. Physical iPhone installation, full offline reopening, and
-populated Safari ownership handoff passed for setup. An iOS 27.2 iPhone
-simulator completed setup with the software keyboard and custom number pad.
-Setup transitions worked; identical Tarsi animation timing is not established.
-Home, grouped Wallet, transfers, budgets, backup/restore, and the remaining
-finance workflows are not implemented. The Cloudflare storage probe remains
-separate. Clerk and Convex have not been provisioned for the app.
+The app in `apps/kuwi` implements local onboarding, accounts, expenses,
+ordinary income, offline cross-currency transfers, category budgets, and
+backup/restore. Recovered Tarsi budget and transfer rules come from static web
+code. iPhone acceptance for finance workflows remains pending, as does browser
+validation for the current transfer changes. Anthony selected Vercel and
+authorized deployment on 2026-11-07. The deployed app is https://kuwi-ten.vercel.app.
+Browser persistence journeys and HTTPS setup/offline checks passed; see [the
+app README](../apps/kuwi/README.md) for coverage and limits. Physical iPhone
+installation, full offline reopening, and populated Safari ownership handoff
+passed for setup. An iOS 27.2 iPhone simulator completed setup with the
+software keyboard and custom number pad. Setup transitions worked; identical
+Tarsi animation timing is not established. Home, grouped Wallet, and the
+remaining finance workflows are outstanding. The Cloudflare
+storage probe remains separate. Clerk and Convex have not been provisioned for
+the app.
 
 ## Data rules
 

@@ -1,4 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { test as base, expect, webkit, chromium } from "@playwright/test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startServer } from "../scripts/serve.mjs";
 const test = base.extend({
   /** Provide mutable fault controls isolated to this journey. */
@@ -108,12 +112,12 @@ const test = base.extend({
       if (storageFault.current === "downgrade-v2")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE transfers; DROP TABLE incomes; DROP TABLE income_categories; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_budget_operations; DROP TABLE budgets; DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE transfers; DROP TABLE incomes; DROP TABLE income_categories; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "downgrade-v3")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV3") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; DROP INDEX expenses_one_fee_per_transfer; ALTER TABLE expenses DROP COLUMN transfer_id; DROP TABLE transfers; PRAGMA user_version=3;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV3") { transaction(() => db.exec("DROP TABLE pending_budget_operations; DROP TABLE budgets; DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; DROP INDEX expenses_one_fee_per_transfer; ALTER TABLE expenses DROP COLUMN transfer_id; DROP TABLE transfers; PRAGMA user_version=3;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "account-rename")
         return source.replace(
@@ -134,24 +138,31 @@ const test = base.extend({
     });
     await new Promise((resolve) => server.once("listening", resolve));
     try {
-      await provide(`http://127.0.0.1:${server.address().port}`);
+      // WebKit shares OPFS by origin across persistent profiles and test runs.
+      const host = `kuwi-${randomUUID()}.localhost`;
+      await provide(`http://${host}:${server.address().port}`);
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     }
   },
-  /** Provide disk-backed WebKit storage or a Chromium context; close it after the journey. */
-  context: async ({ browser, browserName, baseURL }, provide, testInfo) => {
-    const context =
-      browserName === "webkit"
-        ? await webkit.launchPersistentContext(testInfo.outputPath("profile"), {
-            baseURL,
-          })
-        : await browser.newContext({ baseURL });
+  /** Give each journey isolated storage; WebKit needs a persistent profile for OPFS. */
+  context: async ({ browser, browserName, baseURL }, provide) => {
+    const profile = browserName === "webkit"
+      ? await mkdtemp(join(tmpdir(), "kuwi-webkit-"))
+      : null;
+    let context;
     try {
+      if (browserName === "webkit")
+        context = await webkit.launchPersistentContext(profile, { baseURL });
+      else context = await browser.newContext({ baseURL });
       await provide(context);
     } finally {
-      await context.close();
+      try {
+        await context?.close();
+      } finally {
+        if (profile) await rm(profile, { recursive: true, force: true });
+      }
     }
   },
 });
@@ -174,15 +185,44 @@ test("a quota failure stays visible and reopening keeps the saved account", asyn
   await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
 });
 /**
+ * Enter first-run setup or report the local-storage startup screen.
+ * @param {import("@playwright/test").Page} page - Browser page after navigation.
+ * @returns {Promise<void>} Resolves after the first-run button is clicked.
+ * @throws {Error} If local storage fails to open or startup never reaches a usable screen.
+ */
+async function continueOffline(page) {
+  const startButton = page.getByRole("button", {
+    name: "Continue offline",
+    exact: true,
+  });
+  const retryButton = page.getByRole("button", {
+    name: "Retry opening",
+    exact: true,
+  });
+  try {
+    await expect(startButton.or(retryButton)).toBeVisible();
+  } catch (error) {
+    const screen = await page.locator("body").innerText().catch(() => "");
+    throw new Error(
+      `App startup did not reach first-run setup at ${page.url()}. Screen: ${screen || "empty"}. ${error.message}`,
+    );
+  }
+  if (await retryButton.isVisible()) {
+    throw new Error(
+      `Local storage failed to open. Screen: ${await page.locator("body").innerText()}`,
+    );
+  }
+  await startButton.click();
+}
+
+/**
  * Follow visible setup to the account form.
  * @param {import("@playwright/test").Page} page Browser page to drive.
  * @param {boolean} [navigate=true] Open the app first; false continues after startup retry.
  */
 async function setup(page, navigate = true) {
   if (navigate) await page.goto("/");
-  await page
-    .getByRole("button", { name: "Continue offline", exact: true })
-    .click();
+  await continueOffline(page);
   await expect(
     page.getByRole("button", { name: "Next", exact: true }),
   ).toBeDisabled();
@@ -253,9 +293,7 @@ test("reject invalid decimal input without completing setup", async ({
 });
 test("preferred currency is used by the first account", async ({ page }) => {
   await page.goto("/");
-  await page
-    .getByRole("button", { name: "Continue offline", exact: true })
-    .click();
+  await continueOffline(page);
   await page.getByLabel("Preferred name", { exact: true }).fill("Anthony");
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await page
@@ -373,6 +411,7 @@ test("saved setup reopens offline after full browser closure", async ({
 }, testInfo) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
   const directory = testInfo.outputPath("browser-profile");
+  await rm(directory, { recursive: true, force: true });
   let context = await browserType.launchPersistentContext(directory, {
     baseURL,
   });
@@ -588,7 +627,7 @@ test("JPY income rounds to whole yen in history and the derived balance", async 
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Continue offline", exact: true }).click();
+  await continueOffline(page);
   await page.getByLabel("Preferred name", { exact: true }).fill("Anthony");
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await page.getByRole("button", { name: "Skip introduction", exact: true }).click();
@@ -726,7 +765,7 @@ test("JPY expense rounding uses whole yen in history and the derived balance", a
   page,
 }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "Continue offline", exact: true }).click();
+  await continueOffline(page);
   await page.getByLabel("Preferred name", { exact: true }).fill("Anthony");
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await page.getByRole("button", { name: "Skip introduction", exact: true }).click();
@@ -902,6 +941,7 @@ test("income and expense records survive full offline browser closure and allow 
 }, testInfo) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
   const directory = testInfo.outputPath("expense-browser-profile");
+  await rm(directory, { recursive: true, force: true });
   let context = await browserType.launchPersistentContext(directory, { baseURL });
   try {
     let page = await context.newPage();

@@ -1,4 +1,5 @@
 import sqlite3InitModule from "./vendor/sqlite3.mjs";
+import { calculateBudgetProgress, budgetPeriod } from "/budget-calculations.mjs";
 let db, pool, release, ownership;
 let queue = Promise.resolve();
 
@@ -253,24 +254,62 @@ function migrateTransfers() {
 
 /** Add currency-aware transfer columns and backfill prior records in one transaction.
  * Existing transfers keep their source amount as the received amount and use rate `1`.
- * A failed schema or data update rolls back without changing the prior store.
+ * @returns {void} Leaves the database at schema version 7 after commit.
+ * @throws {Error} SQLite rejects a schema or data update; the migration rolls back.
  */
 function migrateTransferCurrencies() {
   transaction(() => {
     const columns = rows("PRAGMA table_info(transfers)").map(({ name }) => name);
-    if (!columns.includes("received_amount_minor"))
+    const needsReceivedBackfill = !columns.includes("received_amount_minor");
+    if (needsReceivedBackfill)
       db.exec("ALTER TABLE transfers ADD COLUMN received_amount_minor INTEGER NOT NULL DEFAULT 1 CHECK(received_amount_minor>0)");
     if (!columns.includes("exchange_rate"))
       db.exec("ALTER TABLE transfers ADD COLUMN exchange_rate TEXT NOT NULL DEFAULT '1' CHECK(length(exchange_rate)>0)");
-    db.exec("UPDATE transfers SET received_amount_minor=amount_minor, exchange_rate='1'");
+    if (needsReceivedBackfill) db.exec("UPDATE transfers SET received_amount_minor=amount_minor");
     db.exec("PRAGMA user_version=7");
+  });
+}
+
+/** Add normalized category budgets and durable write receipts after transfer schema v7.
+ * @returns {void} Leaves the database at schema version 8 after commit.
+ * @throws {Error} SQLite rejects either table or the version update; the migration rolls back.
+ */
+function migrateBudgets() {
+  transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS budgets(
+        category_id TEXT PRIMARY KEY NOT NULL REFERENCES categories(id),
+        amount_milli INTEGER NOT NULL CHECK(amount_milli>=0),
+        type TEXT NOT NULL CHECK(type IN ('fixed','percentage')),
+        percentage_basis_points INTEGER CHECK(percentage_basis_points IS NULL OR percentage_basis_points>=0),
+        interval TEXT NOT NULL CHECK(interval IN ('daily','weekly','bi-weekly','monthly','annually')),
+        rollover_enabled INTEGER NOT NULL CHECK(rollover_enabled IN (0,1)),
+        rollover_started_at TEXT CHECK(rollover_started_at IS NULL OR length(rollover_started_at)=10),
+        biweekly_start_date TEXT CHECK(biweekly_start_date IS NULL OR length(biweekly_start_date)=10),
+        biweekly_end_date TEXT CHECK(biweekly_end_date IS NULL OR length(biweekly_end_date)=10),
+        CHECK((type='fixed' AND percentage_basis_points IS NULL) OR
+          (type='percentage' AND amount_milli=0 AND percentage_basis_points IS NOT NULL AND rollover_enabled=0 AND rollover_started_at IS NULL)),
+        CHECK((rollover_enabled=0 AND rollover_started_at IS NULL) OR
+          (rollover_enabled=1 AND type='fixed' AND rollover_started_at IS NOT NULL))
+      ) STRICT;
+      CREATE TABLE IF NOT EXISTS pending_budget_operations(
+        operation_id TEXT PRIMARY KEY NOT NULL,
+        category_id TEXT NOT NULL REFERENCES categories(id),
+        operation_type TEXT NOT NULL CHECK(operation_type IN ('save','clear')),
+        request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint)=64),
+        created_at TEXT NOT NULL
+      ) STRICT;
+      PRAGMA user_version=8;
+    `);
   });
 }
 
 /**
  * Own the OPFS database lock for the connection lifetime and initialize SQLite.
- * Fresh stores are upgraded through v7; stored v1 through v6 databases run each
- * required migration before a command can read or write data. A failed step
+ * Fresh stores are upgraded through v8; stored v1 through v7 databases run each
+ * required migration before a command can read or write data. Version 7 may be
+ * either the currency-transfer or budget-only layout, so both final migrations
+ * are idempotent. A failed step
  * leaves that step's starting schema and records available for a later retry.
  * @throws {Error} OPFS or Web Locks is unavailable, another tab owns the database,
  *   the database version is unsupported, or initialization fails.
@@ -305,6 +344,7 @@ async function open() {
             migrateTransactionOperations();
             migrateTransfers();
             migrateTransferCurrencies();
+            migrateBudgets();
           } else if (version === 1) {
             migrateV1();
             migrateExpenses();
@@ -312,26 +352,36 @@ async function open() {
             migrateTransactionOperations();
             migrateTransfers();
             migrateTransferCurrencies();
+            migrateBudgets();
           } else if (version === 2) {
             migrateExpenses();
             migrateIncomes();
             migrateTransactionOperations();
             migrateTransfers();
             migrateTransferCurrencies();
+            migrateBudgets();
           } else if (version === 3) {
             migrateIncomes();
             migrateTransactionOperations();
             migrateTransfers();
             migrateTransferCurrencies();
+            migrateBudgets();
           } else if (version === 4) {
             migrateTransactionOperations();
             migrateTransfers();
             migrateTransferCurrencies();
+            migrateBudgets();
           } else if (version === 5) {
             migrateTransfers();
             migrateTransferCurrencies();
-          } else if (version === 6) migrateTransferCurrencies();
-          else if (version !== 7)
+            migrateBudgets();
+          } else if (version === 6) {
+            migrateTransferCurrencies();
+            migrateBudgets();
+          } else if (version === 7) {
+            migrateTransferCurrencies();
+            migrateBudgets();
+          } else if (version !== 8)
             throw Error("Unsupported database version. Existing data has been preserved.");
           const lifetime = new Promise((done) => { release = done; });
           resolve();
@@ -433,12 +483,154 @@ function state() {
   return first ? { ...first, accounts: accountList() } : null;
 }
 
+/** Read category budget definitions and derive current progress from expense and income rows.
+ * @returns {object} Preferred currency, expense categories, per-budget progress, and aggregate summary; empty before setup.
+ * Cross-currency totals are marked unavailable because this store has no FX quote source.
+ * @throws {Error} A ledger query or budget calculation fails.
+ */
+function budgetState() {
+  const profile = rows("SELECT preferred_currency FROM profiles WHERE id=(SELECT profile_id FROM setup WHERE id=1)")[0];
+  if (!profile) return { preferredCurrency: null, categories: [], budgets: [], summary: null };
+  const accounts = accountList();
+  const expenses = rows("SELECT account_id, category_id, amount_minor, date FROM expenses");
+  const incomes = rows("SELECT account_id, amount_minor, date, planned FROM incomes");
+  const budgets = rows(`SELECT b.category_id, c.label AS category_label, b.amount_milli, b.type,
+      b.percentage_basis_points, b.interval, b.rollover_enabled, b.rollover_started_at,
+      b.biweekly_start_date, b.biweekly_end_date
+    FROM budgets b JOIN categories c ON c.id=b.category_id ORDER BY c.sort_order, c.label`)
+    .map((budget) => ({
+      ...budget,
+      ...calculateBudgetProgress({
+        budget,
+        preferredCurrency: profile.preferred_currency,
+        today: localDate(),
+        accounts,
+        expenses,
+        incomes,
+      }),
+    }));
+  const unavailable = budgets.filter((budget) => !budget.available);
+  const summary = unavailable.length
+    ? {
+        available: false,
+        missingCurrencies: [...new Set(unavailable.flatMap(({ missingCurrencies }) => missingCurrencies))].sort(),
+        limit: null,
+        spent: null,
+        remaining: null,
+        progressPercent: null,
+      }
+    : {
+        available: true,
+        missingCurrencies: [],
+        limit: budgets.reduce((sum, budget) => sum + budget.limit, 0),
+        spent: budgets.reduce((sum, budget) => sum + budget.spent, 0),
+        remaining: budgets.reduce((sum, budget) => sum + budget.remaining, 0),
+        progressPercent: Math.min(100, budgets.reduce((sum, budget) => sum + budget.spent, 0) /
+          (budgets.reduce((sum, budget) => sum + budget.limit, 0) || 1) * 100),
+      };
+  return {
+    preferredCurrency: profile.preferred_currency,
+    categories: rows("SELECT id, label FROM categories ORDER BY sort_order"),
+    budgets,
+    summary,
+  };
+}
+
+/** Validate and persist one category budget or zero-clear with an atomic retry receipt.
+ * @param {object} args - Stable ID, built-in expense category, fixed thousandths or percentage basis points, interval, and optional rollover/date settings.
+ * @returns {Promise<{state: object, replayed: boolean}>} Refreshed derived progress and whether the same committed operation was replayed.
+ * @throws {Error} Fields or references are invalid, an ID conflicts, or either write fails.
+ */
+async function saveBudget(args) {
+  const operationId = typeof args.operationId === "string" ? args.operationId.trim() : "";
+  const categoryId = typeof args.categoryId === "string" ? args.categoryId.trim() : "";
+  const type = args.type;
+  const amountMilli = args.amountMilli;
+  const percentageBasisPoints = args.percentageBasisPoints;
+  const interval = args.interval;
+  const rolloverEnabled = args.rolloverEnabled === true;
+  const today = localDate();
+  if (!operationId) throw Error("Save could not be verified. Retry the budget change.");
+  if (!rows("SELECT id FROM categories WHERE id=?", [categoryId])[0])
+    throw Error("Choose an available expense category.");
+  if (!["fixed", "percentage"].includes(type) || !["daily", "weekly", "bi-weekly", "monthly", "annually"].includes(interval))
+    throw Error("Choose a supported budget type and period.");
+  if (!Number.isSafeInteger(amountMilli) || amountMilli < 0)
+    throw Error("Enter a valid budget amount.");
+  if (type === "percentage" && (!Number.isSafeInteger(percentageBasisPoints) || percentageBasisPoints < 0 || amountMilli !== 0))
+    throw Error("Enter a valid percentage of income.");
+  if (type === "fixed" && percentageBasisPoints !== null && percentageBasisPoints !== undefined)
+    throw Error("A fixed budget cannot include a percentage.");
+  const biweeklyStartDate = interval === "bi-weekly" ? args.biweeklyStartDate : null;
+  const biweeklyEndDate = interval === "bi-weekly" ? args.biweeklyEndDate : null;
+  if (interval === "bi-weekly" && (!isValidDate(biweeklyStartDate) || !isValidDate(biweeklyEndDate) || biweeklyEndDate < biweeklyStartDate))
+    throw Error("Choose a valid two-week budget start and end date.");
+  const shouldClear = type === "fixed" ? amountMilli === 0 : percentageBasisPoints === 0;
+  const normalized = {
+    categoryId,
+    type,
+    amountMilli: type === "fixed" ? amountMilli : 0,
+    percentageBasisPoints: type === "percentage" ? percentageBasisPoints : null,
+    interval,
+    rolloverEnabled: type === "fixed" && rolloverEnabled && !shouldClear,
+    biweeklyStartDate,
+    biweeklyEndDate,
+  };
+  const fingerprint = await requestFingerprint(normalized);
+  let replayed = false;
+  transaction(() => {
+    const prior = rows("SELECT category_id, operation_type, request_fingerprint FROM pending_budget_operations WHERE operation_id=?", [operationId])[0];
+    if (prior) {
+      if (prior.category_id !== categoryId || prior.request_fingerprint !== fingerprint ||
+        prior.operation_type !== (shouldClear ? "clear" : "save"))
+        throw Error("This retry contains different budget details.");
+      replayed = true;
+      return;
+    }
+
+    const existing = rows("SELECT interval, type, rollover_enabled, rollover_started_at, biweekly_start_date, biweekly_end_date FROM budgets WHERE category_id=?", [categoryId])[0];
+    const createdAt = new Date().toISOString();
+    if (shouldClear) {
+      db.exec({ sql: "DELETE FROM budgets WHERE category_id=?", bind: [categoryId] });
+    } else {
+      const rollover = normalized.rolloverEnabled;
+      const sameCycle = existing?.interval === interval &&
+        existing?.biweekly_start_date === biweeklyStartDate && existing?.biweekly_end_date === biweeklyEndDate;
+      const keepRolloverStart = rollover && existing?.type === "fixed" &&
+        existing?.rollover_enabled === 1 && sameCycle;
+      const cycle = budgetPeriod(interval, today, {
+        biweeklyStartDate: biweeklyStartDate ?? "1970-01-05",
+        biweeklyEndDate: biweeklyEndDate ?? "1970-01-18",
+      });
+      const rolloverStartedAt = rollover
+        ? keepRolloverStart ? existing.rollover_started_at : cycle.start
+        : null;
+      db.exec({
+        sql: `INSERT INTO budgets(category_id,amount_milli,type,percentage_basis_points,interval,rollover_enabled,rollover_started_at,biweekly_start_date,biweekly_end_date)
+          VALUES(?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(category_id) DO UPDATE SET amount_milli=excluded.amount_milli,type=excluded.type,
+            percentage_basis_points=excluded.percentage_basis_points,interval=excluded.interval,
+            rollover_enabled=excluded.rollover_enabled,rollover_started_at=excluded.rollover_started_at,
+            biweekly_start_date=excluded.biweekly_start_date,biweekly_end_date=excluded.biweekly_end_date`,
+        bind: [categoryId, normalized.amountMilli, type, normalized.percentageBasisPoints, interval,
+          Number(rollover), rolloverStartedAt, biweeklyStartDate, biweeklyEndDate],
+      });
+    }
+    db.exec({
+      sql: "INSERT INTO pending_budget_operations(operation_id,category_id,operation_type,request_fingerprint,created_at) VALUES(?,?,?,?,?)",
+      bind: [operationId, categoryId, shouldClear ? "clear" : "save", fingerprint, createdAt],
+    });
+  });
+  return { state: budgetState(), replayed };
+}
+
 const backupFormat = "kuwi.backup";
 const backupVersion = 1;
-const backupSchemaVersion = 7;
+const backupSchemaVersion = 8;
 const legacyBackupSchemaVersion = 3;
 const previousBackupSchemaVersion = 4;
 const transactionBackupSchemaVersion = 5;
+const transferBackupSchemaVersion = 6;
 const backupCurrencies = { EUR: 2, GBP: 2, JPY: 0, PHP: 2, TWD: 2, USD: 2 };
 const backupCategories = [
   ["food", "Food", 0],
@@ -490,7 +682,7 @@ async function backupDigest(body) {
 }
 
 /** Snapshot every current source relation in deterministic order and attach its integrity digest.
- * @returns {Promise<object>} A complete v1/v7 Kuwi backup envelope.
+ * @returns {Promise<object>} A complete v1/v8 Kuwi backup envelope.
  * @throws {Error} SQLite reads or Web Crypto digest generation fail.
  */
 async function createBackup() {
@@ -514,6 +706,8 @@ async function createBackup() {
     incomes: rows("SELECT id, account_id, category_id, amount_minor, date, note, planned, created_at FROM incomes ORDER BY id"),
     pendingIncomeSyncOperations: rows("SELECT operation_id FROM pending_income_sync_operations ORDER BY operation_id"),
     pendingTransactionOperations: rows("SELECT operation_id, transaction_kind, transaction_id, operation_type, request_fingerprint, created_at FROM pending_transaction_operations ORDER BY operation_id"),
+    budgets: rows("SELECT category_id, amount_milli, type, percentage_basis_points, interval, rollover_enabled, rollover_started_at, biweekly_start_date, biweekly_end_date FROM budgets ORDER BY category_id"),
+    pendingBudgetOperations: rows("SELECT operation_id, category_id, operation_type, request_fingerprint, created_at FROM pending_budget_operations ORDER BY operation_id"),
   };
   const body = { format: backupFormat, version: backupVersion, schemaVersion: backupSchemaVersion, data };
   return {
@@ -595,7 +789,7 @@ function requireTimestamp(value, description) {
 }
 
 /** Validate supported backup envelopes, row constraints, and references without changing live tables.
- * Accepts schema versions 3 through 7 and backfills legacy same-currency transfer fields in memory.
+ * Accepts schema versions 3 through 8 and backfills legacy same-currency transfer fields in memory.
  * Expense dates must be valid calendar dates no later than the browser's local date.
  * @param {unknown} backup - Parsed candidate file contents.
  * @returns {Promise<object>} The candidate's validated current relation rows.
@@ -605,7 +799,8 @@ async function validateBackup(backup) {
   if (!backup || typeof backup !== "object" || Array.isArray(backup) || backup.format !== backupFormat)
     throw Error("This file is not a Kuwi backup.");
   if (backup.version !== backupVersion ||
-    ![legacyBackupSchemaVersion, previousBackupSchemaVersion, transactionBackupSchemaVersion, 6, backupSchemaVersion].includes(backup.schemaVersion))
+    ![legacyBackupSchemaVersion, previousBackupSchemaVersion, transactionBackupSchemaVersion,
+      transferBackupSchemaVersion, 7, backupSchemaVersion].includes(backup.schemaVersion))
     throw Error("This Kuwi backup uses an unsupported version.");
   const expectedEnvelopeKeys = ["data", "exportedAt", "format", "integrity", "schemaVersion", "version"];
   if (Object.keys(backup).sort().join("\0") !== expectedEnvelopeKeys.sort().join("\0"))
@@ -635,24 +830,32 @@ async function validateBackup(backup) {
   const incomeTransactionRelations = [...incomeRelations, "pendingTransactionOperations"];
   const transferTransactionRelations = [...transferRelations, "pendingTransactionOperations"];
   const combinedTransactionRelations = [...combinedRelations, "pendingTransactionOperations"];
-  const currentRelations = combinedTransactionRelations;
+  const v6Relations = combinedTransactionRelations;
+  const currentRelations = [...v6Relations, "budgets", "pendingBudgetOperations"];
   const relationKeys = data && typeof data === "object" && !Array.isArray(data)
     ? Object.keys(data).sort().join("\0")
     : "";
   const keysFor = (relations) => [...relations].sort().join("\0");
-  const hasIncomeRelations = [incomeRelations, combinedRelations, incomeTransactionRelations, combinedTransactionRelations]
+  const hasBudgetRelations = relationKeys === keysFor(currentRelations);
+  const hasIncomeRelations = [incomeRelations, combinedRelations, incomeTransactionRelations, combinedTransactionRelations, currentRelations]
     .some((relations) => relationKeys === keysFor(relations));
-  const hasTransferRelations = [transferRelations, combinedRelations, transferTransactionRelations, combinedTransactionRelations]
+  const hasTransferRelations = [transferRelations, combinedRelations, transferTransactionRelations, combinedTransactionRelations, currentRelations]
     .some((relations) => relationKeys === keysFor(relations));
-  const hasTransactionOperations = [incomeTransactionRelations, transferTransactionRelations, combinedTransactionRelations]
+  const hasTransactionOperations = [incomeTransactionRelations, transferTransactionRelations, combinedTransactionRelations, currentRelations]
     .some((relations) => relationKeys === keysFor(relations));
+  const hasCurrencyAwareTransfers = backup.schemaVersion >= backupSchemaVersion ||
+    (backup.schemaVersion === 7 && !hasBudgetRelations);
   const supportedRelations = backup.schemaVersion === legacyBackupSchemaVersion
     ? [legacyRelations]
     : backup.schemaVersion === previousBackupSchemaVersion
       ? [incomeRelations, transferRelations, combinedRelations]
-      : backup.schemaVersion === transactionBackupSchemaVersion
+    : backup.schemaVersion === transactionBackupSchemaVersion
         ? [incomeTransactionRelations, transferTransactionRelations, combinedTransactionRelations]
-        : [currentRelations];
+        : backup.schemaVersion === transferBackupSchemaVersion
+          ? [v6Relations]
+          : backup.schemaVersion === 7
+            ? [combinedTransactionRelations, currentRelations]
+            : [currentRelations];
   if (!data || typeof data !== "object" || Array.isArray(data) ||
     !supportedRelations.some((relations) => relationKeys === keysFor(relations)))
     throw Error("Backup data constraints failed: the data set is incomplete or unsupported.");
@@ -668,7 +871,7 @@ async function validateBackup(backup) {
     : ["id", "account_id", "category_id", "amount_minor", "date", "note", "created_at"]);
   const pendingSync = requireRows(data, "pendingSyncOperations", ["operation_id"]);
   const transfers = hasTransferRelations
-    ? requireRows(data, "transfers", backup.schemaVersion >= 7
+    ? requireRows(data, "transfers", hasCurrencyAwareTransfers
       ? ["id", "from_account_id", "to_account_id", "amount_minor", "received_amount_minor", "exchange_rate", "fee_amount_minor", "date", "note", "created_at"]
       : ["id", "from_account_id", "to_account_id", "amount_minor", "fee_amount_minor", "date", "note", "created_at"])
     : [];
@@ -686,6 +889,12 @@ async function validateBackup(backup) {
     : [];
   const pendingTransactionOperations = hasTransactionOperations
     ? requireRows(data, "pendingTransactionOperations", ["operation_id", "transaction_kind", "transaction_id", "operation_type", "request_fingerprint", "created_at"])
+    : [];
+  const budgets = hasBudgetRelations
+    ? requireRows(data, "budgets", ["category_id", "amount_milli", "type", "percentage_basis_points", "interval", "rollover_enabled", "rollover_started_at", "biweekly_start_date", "biweekly_end_date"])
+    : [];
+  const pendingBudgetOperations = hasBudgetRelations
+    ? requireRows(data, "pendingBudgetOperations", ["operation_id", "category_id", "operation_type", "request_fingerprint", "created_at"])
     : [];
 
   if (currencies.length !== Object.keys(backupCurrencies).length ||
@@ -715,6 +924,8 @@ async function validateBackup(backup) {
   const accountsById = new Map(accounts.map((row) => [row.id, row]));
   const transfersById = new Map(transfers.map((row) => [row.id, row]));
   requireUnique(pendingTransactionOperations, "operation_id", "pendingTransactionOperations");
+  requireUnique(budgets, "category_id", "budgets");
+  requireUnique(pendingBudgetOperations, "operation_id", "pendingBudgetOperations");
 
   if (profiles.length > 1 || (profiles.length === 1) !== (setupRows.length === 1) ||
     (setupRows.length === 1) !== (accounts.length > 0))
@@ -779,10 +990,10 @@ async function validateBackup(backup) {
       throw Error("Backup reference check failed: a transfer refers to missing or identical accounts.");
     if (!["debit", "credit"].includes(source.type) || destination.type !== "debit")
       throw Error("Backup data constraints failed: transfer accounts are not eligible.");
-    if (backup.schemaVersion < 7 && source.currency_code !== destination.currency_code)
+    if (!hasCurrencyAwareTransfers && source.currency_code !== destination.currency_code)
       throw Error("Backup data constraints failed: a legacy transfer must use the same currency.");
     requireInteger(transfer.amount_minor, "transfers.amount_minor", { minimum: 1 });
-    if (backup.schemaVersion < 7) {
+    if (!hasCurrencyAwareTransfers) {
       transfer.received_amount_minor = transfer.amount_minor;
       transfer.exchange_rate = "1";
     }
@@ -856,6 +1067,29 @@ async function validateBackup(backup) {
     requireTimestamp(operation.created_at, "pendingTransactionOperations.created_at");
   }
 
+  for (const budget of budgets) {
+    if (!categoryIds.has(budget.category_id))
+      throw Error("Backup reference check failed: a budget refers to a missing category.");
+    requireInteger(budget.amount_milli, "budgets.amount_milli", { minimum: 0 });
+    requireInteger(budget.percentage_basis_points, "budgets.percentage_basis_points", { nullable: true, minimum: 0 });
+    if (!["daily", "weekly", "bi-weekly", "monthly", "annually"].includes(budget.interval) ||
+      ![0, 1].includes(budget.rollover_enabled) ||
+      (budget.type === "fixed" && (budget.amount_milli <= 0 || budget.percentage_basis_points !== null)) ||
+      (budget.type === "percentage" && (budget.amount_milli !== 0 || !Number.isSafeInteger(budget.percentage_basis_points) || budget.percentage_basis_points <= 0 || budget.rollover_enabled !== 0)) ||
+      !["fixed", "percentage"].includes(budget.type) ||
+      (budget.rollover_enabled === 1 && (!isValidDate(budget.rollover_started_at) || budget.type !== "fixed")) ||
+      (budget.rollover_enabled === 0 && budget.rollover_started_at !== null) ||
+      (budget.interval === "bi-weekly" && (!isValidDate(budget.biweekly_start_date) || !isValidDate(budget.biweekly_end_date) || budget.biweekly_end_date < budget.biweekly_start_date)) ||
+      (budget.interval !== "bi-weekly" && (budget.biweekly_start_date !== null || budget.biweekly_end_date !== null)))
+      throw Error("Backup data constraints failed: a budget definition is invalid.");
+  }
+  for (const operation of pendingBudgetOperations) {
+    if (!categoryIds.has(operation.category_id) || !["save", "clear"].includes(operation.operation_type) ||
+      !/^[a-f0-9]{64}$/.test(operation.request_fingerprint))
+      throw Error("Backup data constraints failed: a pending budget operation is invalid.");
+    requireTimestamp(operation.created_at, "pendingBudgetOperations.created_at");
+  }
+
   return {
     ...data,
     expenses: expenses.map((expense) => ({ ...expense, transfer_id: expense.transfer_id ?? null })),
@@ -865,10 +1099,12 @@ async function validateBackup(backup) {
     incomes,
     pendingIncomeSyncOperations: pendingIncomeSync,
     pendingTransactionOperations,
+    budgets,
+    pendingBudgetOperations,
   };
 }
 
-/** Replace current records atomically; callers must validate the candidate before calling.
+/** Replace every current relation, including budgets, atomically after candidate validation.
  * @param {object} data - Complete current relations returned by `validateBackup`.
  * @returns {void} Returns after SQLite commits the replacement.
  * @throws {Error} SQLite rejects a delete, insert, constraint, or commit.
@@ -876,6 +1112,8 @@ async function validateBackup(backup) {
 function replaceBackupData(data) {
   transaction(() => {
     db.exec(`
+      DELETE FROM pending_budget_operations;
+      DELETE FROM budgets;
       DELETE FROM pending_transfer_operations;
       DELETE FROM pending_transaction_operations;
       DELETE FROM pending_income_sync_operations;
@@ -904,6 +1142,8 @@ function replaceBackupData(data) {
     insertRows("currencies", ["code", "decimal_places"], data.currencies);
     insertRows("profiles", ["id", "preferred_name", "preferred_currency"], data.profiles);
     insertRows("categories", ["id", "label", "sort_order"], data.categories);
+    insertRows("budgets", ["category_id", "amount_milli", "type", "percentage_basis_points", "interval", "rollover_enabled", "rollover_started_at", "biweekly_start_date", "biweekly_end_date"], data.budgets);
+    insertRows("pending_budget_operations", ["operation_id", "category_id", "operation_type", "request_fingerprint", "created_at"], data.pendingBudgetOperations);
     insertRows("income_categories", ["id", "label", "sort_order"], data.incomeCategories);
     insertRows("accounts", ["id", "name", "type", "currency_code", "credit_limit_minor", "created_at"], data.accounts);
     insertRows("account_adjustments", ["id", "account_id", "amount_minor", "adjustment_type", "created_at"], data.accountAdjustments);
@@ -931,11 +1171,11 @@ async function restoreBackup(backup) {
 }
 
 /**
- * Return one account, all balances, canonical categories, and its transaction history.
- * Transfer rows include source and destination currencies, minor units, and the linked source fee.
+ * Return one account, all balances, canonical categories, transactions, and transfers.
+ * Transfer rows include both currencies, their minor units, the rate, and linked source fee.
  * @param {string} [accountId] - Account ID; omitted to use the setup account.
  * @returns {object|null} The selected account, full account list, category lists, and
- *   that account's transactions; null when the requested account is unavailable.
+ *   that account's ledger rows and transfer history; null when the account is unavailable.
  */
 function readLedger(accountId) {
   const firstAccountId = rows("SELECT first_account_id FROM setup WHERE id=1")[0]?.first_account_id;
@@ -1585,6 +1825,8 @@ async function dispatch({ id, command, args = {} }) {
     else if (command === "complete") result = await complete(args);
     else if (command === "exportBackup") result = await createBackup();
     else if (command === "restoreBackup") result = await restoreBackup(args.backup);
+    else if (command === "budgetState") result = budgetState();
+    else if (command === "saveBudget") result = await saveBudget(args);
     else throw Error("Unknown database operation.");
     self.postMessage({ id, result });
   } catch (error) {

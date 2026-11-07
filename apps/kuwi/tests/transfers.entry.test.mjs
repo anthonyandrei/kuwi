@@ -2,10 +2,25 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   canonicalTransferRate,
+  normalizeTransferInput,
+  parseTransferAmount,
+  parseTransferFee,
   parseTransferRate,
   receivedAmountFromRate,
   rateFromReceivedAmount,
 } from "../src/transfers/entry.ts";
+
+test("source, received, and fee inputs use their own currency precision", () => {
+  assert.equal(parseTransferAmount("100.00", 2), 10000);
+  assert.equal(parseTransferAmount("14987", 0), 14987);
+  assert.equal(parseTransferAmount("1.809", 2), null);
+  assert.equal(parseTransferAmount("0", 2), null);
+  assert.equal(parseTransferFee("", 2), 0);
+  assert.equal(parseTransferFee("1.23", 2), 123);
+  assert.equal(parseTransferFee("1.001", 2), null);
+  assert.equal(normalizeTransferInput("1.809", 2), "1.80");
+  assert.equal(normalizeTransferInput("14987.9", 0), "14987");
+});
 
 test("rate calculation truncates received currency precision before storing minor units", () => {
   assert.equal(receivedAmountFromRate(10000, 2, 149.8765, 0), 14987);

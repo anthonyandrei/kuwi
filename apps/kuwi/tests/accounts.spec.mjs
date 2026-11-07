@@ -1,6 +1,10 @@
 import { chromium, expect, test as base, webkit } from "@playwright/test";
 import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startServer } from "../scripts/serve.mjs";
 
 const populatedV1 = readFileSync(
@@ -14,6 +18,56 @@ const populatedV4 = readFileSync(
 const populatedV4Transfer = readFileSync(
   new URL("./fixtures/populated-v4-transfer.sql", import.meta.url),
   "utf8",
+);
+const populatedV7Currency = populatedV4Transfer.replace(
+  "PRAGMA user_version=4;",
+  `ALTER TABLE transfers ADD COLUMN received_amount_minor INTEGER NOT NULL DEFAULT 1 CHECK(received_amount_minor>0);
+  ALTER TABLE transfers ADD COLUMN exchange_rate TEXT NOT NULL DEFAULT '1' CHECK(length(exchange_rate)>0);
+  UPDATE accounts SET currency_code='USD' WHERE id='legacy-reserve';
+  UPDATE transfers SET received_amount_minor=90, exchange_rate='0.009';
+  CREATE TABLE pending_transaction_operations(
+    operation_id TEXT PRIMARY KEY NOT NULL,
+    transaction_kind TEXT NOT NULL CHECK(transaction_kind IN ('expense','income')),
+    transaction_id TEXT NOT NULL,
+    operation_type TEXT NOT NULL CHECK(operation_type IN ('edit','delete')),
+    request_fingerprint TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  ) STRICT;
+  PRAGMA user_version=7;`,
+);
+const populatedV7Budget = populatedV4Transfer.replace(
+  "PRAGMA user_version=4;",
+  `CREATE TABLE pending_transaction_operations(
+    operation_id TEXT PRIMARY KEY NOT NULL,
+    transaction_kind TEXT NOT NULL CHECK(transaction_kind IN ('expense','income')),
+    transaction_id TEXT NOT NULL,
+    operation_type TEXT NOT NULL CHECK(operation_type IN ('edit','delete')),
+    request_fingerprint TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  ) STRICT;
+  CREATE TABLE budgets(
+    category_id TEXT PRIMARY KEY NOT NULL REFERENCES categories(id),
+    amount_milli INTEGER NOT NULL CHECK(amount_milli>=0),
+    type TEXT NOT NULL CHECK(type IN ('fixed','percentage')),
+    percentage_basis_points INTEGER CHECK(percentage_basis_points IS NULL OR percentage_basis_points>=0),
+    interval TEXT NOT NULL CHECK(interval IN ('daily','weekly','bi-weekly','monthly','annually')),
+    rollover_enabled INTEGER NOT NULL CHECK(rollover_enabled IN (0,1)),
+    rollover_started_at TEXT,
+    biweekly_start_date TEXT,
+    biweekly_end_date TEXT
+  ) STRICT;
+  INSERT INTO budgets VALUES('food',100000,'fixed',NULL,'monthly',0,NULL,NULL,NULL);
+  CREATE TABLE pending_budget_operations(
+    operation_id TEXT PRIMARY KEY NOT NULL,
+    category_id TEXT NOT NULL REFERENCES categories(id),
+    operation_type TEXT NOT NULL CHECK(operation_type IN ('save','clear')),
+    request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint)=64),
+    created_at TEXT NOT NULL
+  ) STRICT;
+  INSERT INTO pending_budget_operations VALUES(
+    'food-budget-save','food','save','cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc','2026-11-04T10:00:00.000Z'
+  );
+  PRAGMA user_version=7;`,
 );
 const populatedV5 = readFileSync(
   new URL("./fixtures/populated-v5.sql", import.meta.url),
@@ -31,13 +85,13 @@ const legacyV3Shell = readFileSync(
 const legacyV3Worker = readFileSync(
   new URL("./fixtures/legacy-v3-worker.js", import.meta.url),
 );
-
 const test = base.extend({
   storageFault: async ({}, provide) => {
-    await provide({ current: null, legacyBuild: false });
+    await provide({ current: null, legacyBuild: false, disableCache: false });
   },
   baseURL: async ({ storageFault }, provide) => {
     const server = startServer(0, (path, bytes) => {
+      if (path === "/sw.js" && storageFault.disableCache) return "";
       if (path === "/" && storageFault.legacyBuild === "v3")
         return legacyV3Shell;
       if (path === "/db-worker.js" && storageFault.legacyBuild === "v3")
@@ -48,11 +102,17 @@ const test = base.extend({
         return legacyV1Worker;
       if (path !== "/db-worker.js" || !storageFault.current) return bytes;
       const source = bytes.toString();
-      if (["upgradeV4", "upgradeV4Transfer", "upgradeV5", "upgradeV5MigrationFailure", "upgradeV6MigrationFailure"].includes(storageFault.current)) {
+      if (["upgradeV4", "upgradeV4Transfer", "upgradeV5", "upgradeV5MigrationFailure", "upgradeV6MigrationFailure", "upgradeV7Currency", "upgradeV7Budget", "upgradeV7BudgetMigrationFailure"].includes(storageFault.current)) {
         const upgrade = storageFault.current;
-        const populated = upgrade === "upgradeV4"
-          ? populatedV4
-          : upgrade === "upgradeV4Transfer" || upgrade === "upgradeV6MigrationFailure" ? populatedV4Transfer : populatedV5;
+        const populated = upgrade === "upgradeV7Currency"
+          ? populatedV7Currency
+          : upgrade === "upgradeV7Budget" || upgrade === "upgradeV7BudgetMigrationFailure"
+            ? populatedV7Budget
+            : upgrade === "upgradeV4"
+              ? populatedV4
+              : upgrade === "upgradeV4Transfer" || upgrade === "upgradeV6MigrationFailure"
+                ? populatedV4Transfer
+                : populatedV5;
         storageFault.current = null;
         let transformed = source.replace(
           'const version = db.selectValue("PRAGMA user_version");',
@@ -69,6 +129,11 @@ const test = base.extend({
           transformed = transformed.replace(
             '    db.exec("PRAGMA user_version=7");',
             '    throw Error("Simulated currency migration failure");\n    db.exec("PRAGMA user_version=7");',
+          );
+        if (upgrade === "upgradeV7BudgetMigrationFailure")
+          transformed = transformed.replace(
+            "      PRAGMA user_version=8;",
+            "      INSERT INTO __missing_budget_migration_table DEFAULT VALUES;\n      PRAGMA user_version=8;",
           );
         return transformed;
       }
@@ -99,6 +164,13 @@ const test = base.extend({
         return source.replace(
           "    self.postMessage({ id, result });",
           '    if (command === "updateTransaction" && !self.__transactionReplyDropped) { self.__transactionReplyDropped = true; self.postMessage({ id, error: "Simulated lost transaction reply" }); } else self.postMessage({ id, result });',
+        );
+      }
+      if (storageFault.current === "transferReply") {
+        storageFault.current = null;
+        return source.replace(
+          "    self.postMessage({ id, result });",
+          '    if (command === "createTransfer" && !self.__transferReplyDropped) { self.__transferReplyDropped = true; self.postMessage({ id, error: "Simulated lost transfer reply" }); } else self.postMessage({ id, result });',
         );
       }
       if (storageFault.current === "accountReply") {
@@ -142,28 +214,71 @@ const test = base.extend({
     });
     await new Promise((resolve) => server.once("listening", resolve));
     try {
-      await provide(`http://127.0.0.1:${server.address().port}`);
+      // WebKit shares OPFS by origin across persistent profiles and test runs.
+      const host = `kuwi-${randomUUID()}.localhost`;
+      await provide(`http://${host}:${server.address().port}`);
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
     }
   },
-  context: async ({ browser, browserName, baseURL }, provide, testInfo) => {
-    const context = browserName === "webkit"
-      ? await webkit.launchPersistentContext(testInfo.outputPath("profile"), { baseURL })
-      : await browser.newContext({ baseURL });
+  /** Give each journey isolated storage; WebKit needs a persistent profile for OPFS. */
+  context: async ({ browser, browserName, baseURL }, provide) => {
+    const profile = browserName === "webkit"
+      ? await mkdtemp(join(tmpdir(), "kuwi-webkit-"))
+      : null;
+    let context;
     try {
+      if (browserName === "webkit")
+        context = await webkit.launchPersistentContext(profile, { baseURL });
+      else context = await browser.newContext({ baseURL });
       await provide(context);
     } finally {
-      await context.close();
+      try {
+        await context?.close();
+      } finally {
+        if (profile) await rm(profile, { recursive: true, force: true });
+      }
     }
   },
 });
+
+/**
+ * Enter first-run setup or report the local-storage startup screen.
+ * @param page - Browser page after navigation.
+ * @returns Resolves after the first-run button is clicked.
+ * @throws {Error} If local storage fails to open or startup never reaches a usable screen.
+ */
+async function continueOffline(page) {
+  const startButton = page.getByRole("button", {
+    name: "Continue offline",
+    exact: true,
+  });
+  const retryButton = page.getByRole("button", {
+    name: "Retry opening",
+    exact: true,
+  });
+  try {
+    await expect(startButton.or(retryButton)).toBeVisible();
+  } catch (error) {
+    const screen = await page.locator("body").innerText().catch(() => "");
+    throw new Error(
+      `App startup did not reach first-run setup at ${page.url()}. Screen: ${screen || "empty"}. ${error.message}`,
+    );
+  }
+  if (await retryButton.isVisible()) {
+    throw new Error(
+      `Local storage failed to open. Screen: ${await page.locator("body").innerText()}`,
+    );
+  }
+  await startButton.click();
+}
 
 /** Complete visible first-run setup with the selected currency and opening balance.
  * @param page - Browser page to drive through the first-run form.
  * @param options - Optional preferred name, currency, and opening amount text.
  * @returns Resolves after the saved account list appears.
+ * @throws {Error} If local storage fails to open before setup starts.
  */
 async function finishSetup(page, {
   name = "Anthony",
@@ -171,7 +286,7 @@ async function finishSetup(page, {
   openingBalance = "0",
 } = {}) {
   await page.goto("/");
-  await page.getByRole("button", { name: "Continue offline" }).click();
+  await continueOffline(page);
   await page.getByLabel("Preferred name").fill(name);
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await page.getByRole("button", { name: "Skip introduction" }).click();
@@ -200,8 +315,10 @@ test("a populated legacy build updates on the same origin and reopens offline", 
   storageFault,
 }, testInfo) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
+  const profile = testInfo.outputPath("legacy-update-profile");
+  await rm(profile, { recursive: true, force: true });
   const context = await browserType.launchPersistentContext(
-    testInfo.outputPath("legacy-update-profile"),
+    profile,
     { baseURL },
   );
   try {
@@ -256,8 +373,10 @@ test("a legacy expense and backup survive the shell update", async ({
   storageFault,
 }, testInfo) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
+  const profile = testInfo.outputPath("legacy-expense-update-profile");
+  await rm(profile, { recursive: true, force: true });
   const context = await browserType.launchPersistentContext(
-    testInfo.outputPath("legacy-expense-update-profile"),
+    profile,
     { baseURL },
   );
   try {
@@ -329,7 +448,7 @@ test("a legacy expense and backup survive the shell update", async ({
     const currentDownload = await currentDownloadPromise;
     const currentBackup = JSON.parse(readFileSync(await currentDownload.path(), "utf8"));
     expect(currentBackup).toMatchObject({
-      schemaVersion: 7,
+      schemaVersion: 8,
       data: {
         expenses: expect.arrayContaining([expect.objectContaining({ transfer_id: expect.any(String) })]),
         transfers: [expect.objectContaining({ fee_amount_minor: 456, note: "Updated schema transfer" })],
@@ -563,7 +682,7 @@ test("expense and income edits move effects between accounts and deletions prese
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(7);
+  expect(backup.schemaVersion).toBe(8);
   expect(backup.data.expenses).toHaveLength(1);
   expect(backup.data.expenses[0].note).toBe("Rent");
   expect(backup.data.pendingSyncOperations).toEqual([
@@ -681,6 +800,11 @@ test("an edit with a lost reply reuses its saved operation ID", async ({
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByRole("status")).toContainText("Transaction updated");
   await expect(page.getByText("₱980.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Edit Coffee" }).click();
+  await page.getByLabel("Transaction amount").fill("22");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.getByRole("status")).toContainText("Transaction updated");
+  await expect(page.getByText("₱978.00", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Back to account" }).click();
   await page.getByRole("button", { name: "Back to accounts" }).click();
@@ -689,16 +813,27 @@ test("an edit with a lost reply reuses its saved operation ID", async ({
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup.data.expenses).toHaveLength(1);
-  expect(backup.data.expenses[0].amount_minor).toBe(2000);
+  expect(backup.data.expenses[0].amount_minor).toBe(2200);
   expect(backup.data.pendingSyncOperations).toEqual([
     { operation_id: backup.data.expenses[0].id },
   ]);
-  expect(backup.data.pendingTransactionOperations).toHaveLength(1);
-  expect(backup.data.pendingTransactionOperations[0]).toMatchObject({
-    transaction_kind: "expense",
-    operation_type: "edit",
-    transaction_id: backup.data.expenses[0].id,
-  });
+  expect(backup.data.pendingTransactionOperations).toHaveLength(2);
+  expect(
+    new Set(
+      backup.data.pendingTransactionOperations.map(
+        ({ operation_id }) => operation_id,
+      ),
+    ).size,
+  ).toBe(2);
+  expect(backup.data.pendingTransactionOperations).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        transaction_kind: "expense",
+        operation_type: "edit",
+        transaction_id: backup.data.expenses[0].id,
+      }),
+    ]),
+  );
 });
 
 test("a populated v4 database migrates while keeping account and transaction identities", async ({
@@ -720,7 +855,7 @@ test("a populated v4 database migrates while keeping account and transaction ide
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(7);
+  expect(backup.schemaVersion).toBe(8);
   expect(backup.data.accounts.map(({ id }) => id)).toEqual(["legacy-cash", "legacy-reserve"]);
   expect(backup.data.expenses.map(({ id }) => id)).toEqual(["legacy-expense"]);
   expect(backup.data.incomes.map(({ id }) => id)).toEqual(["legacy-income"]);
@@ -752,7 +887,7 @@ test("a populated v5 database gains transfer relations without losing transactio
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup).toMatchObject({
-    schemaVersion: 7,
+    schemaVersion: 8,
     data: {
       expenses: expect.arrayContaining([
         expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
@@ -812,7 +947,7 @@ test("a populated v4 transfer database keeps its transfer and linked fee through
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
   expect(backup).toMatchObject({
-    schemaVersion: 7,
+    schemaVersion: 8,
     data: {
       expenses: expect.arrayContaining([
         expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
@@ -871,7 +1006,7 @@ test("cross-currency transfers preserve both minor-unit amounts through history,
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(7);
+  expect(backup.schemaVersion).toBe(8);
   expect(backup.data.transfers).toEqual([
     expect.objectContaining({
       amount_minor: 10000,
@@ -916,6 +1051,43 @@ test("a failed cross-currency write rolls back every effect and retries once", a
   await expect(page.getByText(/(?:US)?\$9\.00/)).toBeVisible();
 });
 
+test("a lost transfer reply reuses the committed conversion and writes its fee once", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.current = "transferReply";
+  await finishSetup(page, { openingBalance: "1000" });
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByLabel("Account name").fill("Dollar wallet");
+  await page.getByRole("button", { name: "USD US Dollar" }).click();
+  await page.getByRole("button", { name: "Save account" }).click();
+  await page.getByRole("button", { name: "View account Cash" }).click();
+  await page.getByRole("button", { name: "Transfer between accounts" }).click();
+  await page.getByLabel("To account").selectOption({ label: "Dollar wallet" });
+  await page.getByLabel("Transfer amount").fill("100");
+  await page.getByLabel("Exchange rate").fill("0.018");
+  await page.getByLabel("Transfer fee (optional)").fill("1");
+  await page.getByRole("button", { name: "Save transfer" }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated lost transfer reply");
+  await page.getByRole("button", { name: "Save transfer" }).click();
+  await expect(page.getByText("₱899.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export backup" }).click();
+  const download = await downloadPromise;
+  const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
+  expect(backup.data.transfers).toHaveLength(1);
+  expect(backup.data.transfers[0]).toMatchObject({
+    amount_minor: 10000,
+    received_amount_minor: 180,
+    exchange_rate: "0.018",
+    fee_amount_minor: 100,
+  });
+  expect(backup.data.expenses.filter(({ transfer_id }) => transfer_id)).toHaveLength(1);
+  expect(backup.data.pendingTransferOperations).toHaveLength(1);
+});
+
 test("a failed v7 currency migration preserves a populated v6 transfer store", async ({
   page,
   storageFault,
@@ -930,6 +1102,63 @@ test("a failed v7 currency migration preserves a populated v6 transfer store", a
   await page.getByRole("button", { name: "Transaction history" }).click();
   await expect(page.getByText("Legacy transfer", { exact: true })).toBeVisible();
   await expect(page.getByText(/Sent ₱100\.00 PHP · received ₱100\.00 PHP/)).toBeVisible();
+});
+
+test("a populated budget-only v7 store retries into v8 without losing budget or transfer facts", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.current = "upgradeV7BudgetMigrationFailure";
+  storageFault.disableCache = true;
+  await page.goto("/");
+  await expect(page.getByRole("alert")).toContainText("no such table");
+
+  await page.reload();
+  await expect(page.getByText("₱908.44", { exact: true })).toBeVisible();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export backup" }).click();
+  const download = await downloadPromise;
+  const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
+  expect(backup.schemaVersion).toBe(8);
+  expect(backup.data.budgets).toEqual([
+    expect.objectContaining({ category_id: "food", amount_milli: 100000, interval: "monthly" }),
+  ]);
+  expect(backup.data.pendingBudgetOperations).toEqual([
+    expect.objectContaining({ operation_id: "food-budget-save", category_id: "food" }),
+  ]);
+  expect(backup.data.transfers).toEqual([
+    expect.objectContaining({
+      id: "legacy-transfer",
+      amount_minor: 10000,
+      received_amount_minor: 10000,
+      exchange_rate: "1",
+      fee_amount_minor: 456,
+    }),
+  ]);
+});
+
+test("a populated currency-aware v7 store keeps received amounts when budgets are added", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.current = "upgradeV7Currency";
+  await page.goto("/");
+  await expect(page.getByText("₱908.44", { exact: true })).toBeVisible();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export backup" }).click();
+  const download = await downloadPromise;
+  const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
+  expect(backup.schemaVersion).toBe(8);
+  expect(backup.data.transfers).toEqual([
+    expect.objectContaining({
+      id: "legacy-transfer",
+      amount_minor: 10000,
+      received_amount_minor: 90,
+      exchange_rate: "0.009",
+      fee_amount_minor: 456,
+    }),
+  ]);
+  expect(backup.data.budgets).toEqual([]);
 });
 
 test("manual transfer entry saves and reopens while offline", async ({ page, context }) => {
@@ -948,12 +1177,17 @@ test("manual transfer entry saves and reopens while offline", async ({ page, con
   await page.getByLabel("Amount received (USD)").fill("1.809");
   await expect(page.getByLabel("Amount received (USD)")).toHaveValue("1.80");
   await expect(page.getByLabel("Exchange rate")).toHaveValue("0.018");
+  await expect(page.getByLabel("Transfer summary")).toContainText("100.00");
+  await expect(page.getByLabel("Transfer summary")).toContainText("1.80");
   await page.getByRole("button", { name: "Save transfer" }).click();
   await expect(page.getByText("₱900.00", { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByText("₱900.00", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "View account Dollar wallet" }).click();
   await expect(page.getByText(/(?:US)?\$1\.80/)).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history" }).click();
+  await expect(page.getByText(/Sent ₱100\.00 PHP · received (?:US)?\$1\.80 USD/)).toBeVisible();
+  await expect(page.getByText("Rate: 1 PHP = 0.018 USD", { exact: true })).toBeVisible();
 });
 
 test("migrates a populated v1 database into derived account balances", async ({

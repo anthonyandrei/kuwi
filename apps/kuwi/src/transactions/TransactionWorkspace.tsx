@@ -37,9 +37,9 @@ function formatMoney(minor: number, currency: string, digits: number): string {
 }
 
 /**
- * Render an expense or income form, or history with corrections, deletions, and both transfer amounts.
+ * Render an expense or income form, or history with transaction actions and both transfer amounts.
  * @param mode - Entry type or history view to show.
- * @param ledger - Selected account, all account balances, canonical categories, and saved transactions.
+ * @param ledger - Selected account, all account balances, canonical categories, transactions, and transfers.
  * @param onBack - Return to the selected account screen.
  * @param onLedgerChange - Publish the refreshed ledger after a successful mutation.
  * @returns The form or combined transaction history for the selected account.

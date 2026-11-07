@@ -269,6 +269,57 @@ the `application/javascript` response and the browser access host was
 unavailable. The action rules above are verified; exact transfer screen
 interactions and iPhone comparison remain open.
 
+## Category budgets
+
+Verified 2026-11-07 from the shipped Tarsi WEB category budget and category
+settings chunks, plus common-bundle store module 1685. The lazy chunks have
+SHA-256 hashes `3da233a7dd0b17d17533b5873eec71b13b325443bdcd80e68812e51b4baa5cbe`
+and `56c84f52a242daa1f72686877176cbd318730ce660be5747e700deaea4205842`;
+module 1685's source slice is `ad0c6f6bade6417009cc2fb4fa471def9d117b4dcfc1de13a1770896b42ef322`.
+This is static code evidence. It does not establish Tarsi iPhone 2.5.9
+behavior; physical acceptance remains pending.
+
+Tarsi exposes expense-category budgets. The Income tab does not create income
+budgets; percentage-of-income is a type of expense-category budget. Each
+category has a fixed or percentage limit and a daily, weekly, bi-weekly,
+monthly, or annual interval. New budgets default to fixed and monthly. Saving
+zero clears a budget. There is no global cap or account-specific budget.
+
+| Interval | Boundary rule |
+| --- | --- |
+| Daily | The reference date only. |
+| Weekly | Monday through Sunday. |
+| Bi-weekly | Repeat the saved inclusive start-to-end length from its anchor; new budgets use today through today plus 13 days. |
+| Monthly | Use the configured day, default 1, clamped to each month's last day. End the day before the next cycle starts. |
+| Annual | January 1 through December 31. |
+
+Budgets cover all accounts. Expense progress sums entries in the selected
+category and inclusive period when `affectsSpending` is not false and the entry
+is not planned. An explicit planned flag takes precedence; otherwise a future
+date without a recurring-expense ID is treated as planned. Percentage limits
+use actual income across accounts and categories in that same period; planned
+income is excluded. Edits and deletions affect progress because it is derived
+from the current ledger. Transfer principal is not passed to the budget helper.
+A transfer fee is a separate expense in Fees and counts once when eligible.
+Displayed progress is capped at 100%; remaining can be negative. The summary
+sums active category limits and spending, then caps aggregate progress at
+100%.
+
+Fixed budgets can roll unused allowance forward. Enabling rollover stores the
+current cycle start. Amount changes preserve that date; interval or bi-weekly
+anchor changes reset it. The effective allowance multiplies the configured
+amount by elapsed cycles. Spending accumulates from the stored start through
+today. Percentage budgets do not roll over.
+
+Budget values have no currency field. Tarsi interprets them in the profile's
+preferred currency and converts each eligible expense and income using its
+USD-base exchange quotes. It does not round converted amounts before summing.
+A missing required quote makes progress unavailable. Kuwi has no exchange
+quote source, so cross-currency progress is unavailable and no rate is
+invented. Kuwi currently implements built-in expense categories only; custom
+or hidden categories, subcategory budgets, and Pro entitlement rules remain
+outside this issue.
+
 ## Device persistence
 
 Source chain in the common bundle:
@@ -426,9 +477,9 @@ behavior; iPhone keyboard, formatting, and motion acceptance remains pending.
 ## Next evidence needed
 
 - Extend the observed iPhone first-run path with validation and currency edge cases.
-- Trace built-in category overrides, budget cycles, advanced linked transaction
-  corrections, and currency edge cases before defining their acceptance
-  criteria.
+- Compare budget cycles, eligible entries, and category behavior on iPhone.
+  Trace advanced linked transaction corrections and currency edge cases before
+  defining their acceptance criteria.
 - Trace cloud snapshot synchronization and observe conflicting edits before
   accepting a conflict policy.
 - Inventory the remaining screens, gestures, and mascot assets. No complete
