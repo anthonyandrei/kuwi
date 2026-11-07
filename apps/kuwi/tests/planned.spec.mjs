@@ -467,6 +467,47 @@ test("a create retry after logging replays its original planned request", async 
   await expect(page.getByText("Retry after log", { exact: true })).toHaveCount(1);
 });
 
+test("a create retry after correction keeps the corrected row and original plan identity", async ({
+  context,
+  storageFault,
+}) => {
+  storageFault.today = "2026-11-07";
+  storageFault.loseExpenseReply = true;
+  const page = await context.newPage();
+  await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", {
+    configurable: true,
+    value: () => "planned-retry-after-correction",
+  }));
+  await finishSetup(page);
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("40");
+  await page.getByLabel("Expense date", { exact: true }).fill("2026-11-08");
+  await page.getByLabel("Expense note", { exact: true }).fill("Original plan request");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated lost planned expense reply");
+
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await page.clock.fastForward(24 * 60 * 60 * 1000);
+  await setWorkerDate(page, "2026-11-08");
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await page.getByRole("button", { name: "Edit Original plan request", exact: true }).click();
+  await page.getByLabel("Expense note", { exact: true }).fill("Corrected plan note");
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("40");
+  await page.getByLabel("Expense date", { exact: true }).fill("2026-11-08");
+  await page.getByLabel("Expense note", { exact: true }).fill("Original plan request");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Corrected plan note", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("Original plan request", { exact: true })).toHaveCount(0);
+});
+
 test("expense create rejects a changed planned intent under the same ID", async ({ context, storageFault }) => {
   storageFault.today = "2026-11-07";
   storageFault.loseExpenseReply = true;
