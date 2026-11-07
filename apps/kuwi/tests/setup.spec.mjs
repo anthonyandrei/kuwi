@@ -13,13 +13,13 @@ const test = base.extend({
       const source = bytes.toString();
       if (storageFault.current === "write")
         return source.replace(
-          /db\.exec\(\{\s*sql: "INSERT INTO accounts/,
-          'throw Error("Simulated write failure"); db.exec({sql: "INSERT INTO accounts',
+          /db\.exec\(\{\s*sql: "INSERT INTO accounts VALUES\([^)]+debit[^)]*\)"/,
+          "throw Error(\"Simulated write failure\"); db.exec({sql: \"INSERT INTO accounts VALUES(?,?, 'debit', ?, NULL, ?)\"",
         );
       if (storageFault.current === "interrupt")
         return source.replace(
-          /db\.exec\(\{\s*sql: "INSERT INTO accounts/,
-          'while(true) {} db.exec({sql: "INSERT INTO accounts',
+          /db\.exec\(\{\s*sql: "INSERT INTO accounts VALUES\([^)]+debit[^)]*\)"/,
+          "while(true) {} db.exec({sql: \"INSERT INTO accounts VALUES(?,?, 'debit', ?, NULL, ?)\"",
         );
       if (storageFault.current === "reply") {
         storageFault.current = null;
@@ -209,6 +209,47 @@ test("lost save reply exposes retry and returns the committed setup", async ({
   await expect(page.getByText("₱1,234.56", { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByText("₱1,234.56", { exact: true })).toBeVisible();
+});
+
+test("setup retry rejects the same operation ID with different details", async ({
+  page,
+}) => {
+  await setup(page);
+  await page.getByLabel("Opening balance (PHP)", { exact: true }).fill("25");
+  await page.getByRole("button", { name: "Save my account", exact: true }).click();
+  await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Close database", exact: true }).click();
+  await expect(page.getByText("Database closed", { exact: true })).toBeVisible();
+
+  const response = await page.evaluate(() => new Promise((resolve) => {
+    const worker = new Worker("/db-worker.js", { type: "module" });
+    let commandResult;
+    worker.onmessage = ({ data }) => {
+      if (data.id === 1) {
+        commandResult = data;
+        worker.postMessage({ id: 2, command: "close" });
+      } else if (data.id === 2) {
+        worker.terminate();
+        resolve(commandResult);
+      }
+    };
+    worker.postMessage({
+      id: 1,
+      command: "complete",
+      args: {
+        name: "Different name",
+        account: "Cash",
+        currency: "PHP",
+        amountMinor: 2500,
+        operationId: "setup:first",
+      },
+    });
+  }));
+
+  expect(response.error).toContain("already used for different account details");
+  await page.getByRole("button", { name: "Retry opening", exact: true }).click();
+  await expect(page.getByText("Welcome, Anthony.", { exact: true })).toBeVisible();
+  await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
 });
 
 test("saved setup reopens offline after full browser closure", async ({

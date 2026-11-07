@@ -1,3 +1,13 @@
+export type Account = {
+  id: string;
+  name: string;
+  type: "debit" | "assets" | "credit";
+  currency_code: string;
+  credit_limit_minor: number | null;
+  balance_minor: number;
+  has_activity: number;
+};
+
 export type Setup = {
   preferred_name: string;
   preferred_currency: string;
@@ -5,18 +15,26 @@ export type Setup = {
   account_name: string;
   currency_code: string;
   opening_balance_minor: number;
+  accounts: Account[];
 };
+
+export type DatabaseResult = Setup | Account[] | Account | null;
+
 let worker: Worker | undefined;
 let sequence = 0;
 const pending = new Map<
   number,
   {
-    resolve: (value: Setup | null) => void;
+    resolve: (value: DatabaseResult) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }
 >();
-/** Terminate the owned worker and reject every unfinished call, clearing its timer. */
+
+/**
+ * Terminate the worker and reject every unfinished call.
+ * @param error - Failure to report to all calls waiting on this worker.
+ */
 function stopWorker(error: Error) {
   worker?.terminate();
   worker = undefined;
@@ -26,18 +44,18 @@ function stopWorker(error: Error) {
   }
   pending.clear();
 }
+
 /**
- * Send a serialized storage operation. Reject with the worker's storage or validation error.
- * @param command - Internal state, complete, or close operation.
- * @param args - Completion fields when saving setup; omitted for reads and close.
- * @returns Saved setup, or null before setup and after close.
- * A missing reply terminates the worker after 15 seconds for saves or 60 seconds otherwise.
- * The module owns the worker; callers surface failures. Timed-out calls retry with a fresh worker.
+ * Send one serialized database command and surface worker failures to the caller.
+ * Writes time out after 15 seconds so the UI can offer the same operation ID for retry;
+ * reads wait up to 60 seconds for OPFS initialization.
+ * @param command - A supported worker command.
+ * @param args - Command-specific values passed to the dedicated worker.
  */
 export function database(
-  command: string,
+  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "close",
   args: object = {},
-): Promise<Setup | null> {
+): Promise<DatabaseResult> {
   if (!worker) {
     worker = new Worker("/db-worker.js", { type: "module" });
     worker.onmessage = ({ data }) => {
@@ -48,28 +66,31 @@ export function database(
       else call?.resolve(data.result);
     };
     worker.onerror = () =>
-      stopWorker(
-        Error("Database worker failed. Retry to reopen existing storage."),
-      );
+      stopWorker(Error("Database worker failed. Retry to reopen existing storage."));
   }
   return new Promise((resolve, reject) => {
     const id = ++sequence;
+    const isWrite = command === "complete" || command.startsWith("account.");
     const timer = setTimeout(
       () =>
         stopWorker(
           Error(
-            command === "complete"
-              ? "Save confirmation timed out. Retry saving to check whether your setup was saved."
+            isWrite
+              ? "Save confirmation timed out. Retry the account change to check whether it was saved."
               : "Opening local storage timed out. Retry to reopen existing storage.",
           ),
         ),
-      command === "complete" ? 15000 : 60000,
+      isWrite ? 15000 : 60000,
     );
     pending.set(id, { resolve, reject, timer });
     worker!.postMessage({ id, command, args });
   });
 }
-/** Close files and release ownership before allowing a new worker to retry startup. */
+
+/**
+ * Close the database before releasing ownership for another tab.
+ * Any call still waiting when the worker stops rejects with a close error.
+ */
 export async function closeDatabase() {
   if (worker) {
     try {
