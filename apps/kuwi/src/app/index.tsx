@@ -16,10 +16,12 @@ import {
   type Account,
   type TransactionLedger,
   type ProductBackup,
+  type BudgetState,
   type Setup,
 } from "../storage/client";
 import { TransactionWorkspace } from "../transactions/TransactionWorkspace";
 import { TransferWorkspace } from "../transfers/TransferWorkspace";
+import { BudgetWorkspace } from "../budgets/BudgetWorkspace";
 const currencies = [
   ["PHP", "Philippine Peso"],
   ["USD", "US Dollar"],
@@ -74,7 +76,7 @@ function formatMoney(amount: number, currency: string) {
 
 type AccountForm = { mode: "create" } | { mode: "edit"; account: Account };
 
-/** Render local setup, account management, transaction workspaces, and backup actions. */
+/** Render local setup, account, transaction, transfer, budget, and backup workspaces. */
 export default function Home() {
   const [saved, setSaved] = useState<Setup | null>(null),
     [phase, setPhase] = useState("loading");
@@ -100,6 +102,8 @@ export default function Home() {
   const [transactionLedger, setTransactionLedger] = useState<TransactionLedger | null>(null);
   const [transactionMode, setTransactionMode] = useState<"expense" | "income" | "history" | null>(null);
   const [transferOpen, setTransferOpen] = useState(false);
+  const [budgetState, setBudgetState] = useState<BudgetState | null>(null);
+  const [budgetOpen, setBudgetOpen] = useState(false);
   const [backupMessage, setBackupMessage] = useState("");
   /**
    * Reopen the worker and read canonical setup, updating saved data and phase.
@@ -239,6 +243,19 @@ export default function Home() {
       setError((failure as Error).message);
     }
   }
+  /** Read canonical category budgets and derived progress before navigation.
+   * @returns Resolves after opening the budget view or displaying a storage error.
+   */
+  async function openBudgetWorkspace() {
+    setError("");
+    try {
+      const budgets = await database<BudgetState>("budgetState");
+      setBudgetState(budgets);
+      setBudgetOpen(true);
+    } catch (failure) {
+      setError((failure as Error).message);
+    }
+  }
   /** Validate onboarding amounts and commit setup through the worker's atomic command. */
   async function finish() {
     const digits = currency === "JPY" ? 0 : 2;
@@ -309,7 +326,7 @@ export default function Home() {
   }
   /** Parse and restore one selected file, updating visible state only after commit.
    * @param {File} file - User-selected backup contents; extension and MIME type are ignored.
-   * @returns {Promise<void>} Resolves after success or after a failure is shown to the user.
+   * @returns {Promise<void>} Resolves after success or after a failure is shown to the user; restored budgets reopen from the committed backup.
    */
   async function restoreBackupFile(file: File) {
     setSaving(true);
@@ -327,6 +344,8 @@ export default function Home() {
       setSelectedAccount(null);
       setTransactionLedger(null);
       setTransactionMode(null);
+      setBudgetState(null);
+      setBudgetOpen(false);
       setAccountForm(null);
       setBackupMessage("Backup restored.");
     } catch (failure) {
@@ -452,7 +471,16 @@ export default function Home() {
         ) : saved ? (
           <View style={s.content}>
             <Text style={s.title}>Welcome, {saved.preferred_name}.</Text>
-            {transferOpen && selectedAccount ? (
+            {!transferOpen && !budgetOpen && !transactionMode && !accountForm
+              ? button("Budgets", () => void openBudgetWorkspace())
+              : null}
+            {budgetOpen && budgetState ? (
+              <BudgetWorkspace
+                initialState={budgetState}
+                onBack={() => setBudgetOpen(false)}
+                onStateChange={setBudgetState}
+              />
+            ) : transferOpen && selectedAccount ? (
               <TransferWorkspace
                 accounts={saved.accounts}
                 initialAccount={selectedAccount}

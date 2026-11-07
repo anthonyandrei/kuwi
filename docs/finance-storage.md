@@ -1,6 +1,6 @@
 # Local finance storage
 
-Kuwi stores account and transaction facts in strict SQLite tables in OPFS. It
+Kuwi stores account, transaction, and budget facts in strict SQLite tables in OPFS. It
 uses ordered `PRAGMA user_version` migrations and derives balances from ledger
 rows rather than keeping a mutable balance copy.
 
@@ -14,13 +14,12 @@ Version 3 adds expense categories, expenses, pending sync markers, and an
 account/date index. Version 4 adds income categories, incomes, pending income
 sync markers, and an account/date index. Version 5 adds transaction
 edit/delete receipts. Version 6 adds transfers, linked fee references on
-expenses, and pending transfer operations.
+expenses, and pending transfer operations. Version 7 adds canonical category
+budgets and pending budget operation receipts.
 
-A new database builds through versions 2, 3, 4, 5, and 6. Version 1 migrates
-through the same sequence. Version 2 runs migrations 3 through 6, version 3
-runs migrations 4 through 6, version 4 runs migrations 5 and 6, and version 5
-runs migration 6. Each migration commits in its own transaction. A failed step
-keeps its starting schema and data for a retry.
+A new database builds through versions 2 through 7. Older databases run each
+remaining migration in order, with each step in its own transaction. A failed
+step keeps its starting schema and data for a retry.
 
 The v6 migration supports both earlier v4 layouts. Income-only v4 databases
 receive transfer relations, and v4 databases that already contain transfers
@@ -45,6 +44,24 @@ transfer ID. The fee name is `Bank transfer fee to <destination>`. The transfer
 uses the selected date, including future dates, and affects balances
 immediately.
 
+Budgets store one definition per expense category. A fixed amount uses
+thousandths of the preferred currency unit; a percentage uses integer
+hundredths of a percent and derives its limit from actual income in the same
+interval. Saving zero clears the definition. Saving or clearing a definition
+and its pending operation receipt share one SQLite transaction. A retry with
+the same operation ID and content returns the committed state; changed content
+under that ID fails. Amount edits preserve a rollover start, while changing
+the interval or bi-weekly anchors starts a new rollover span.
+
+Progress comes from eligible expense and income rows each time it is read.
+Expenses count across accounts by category and inclusive period. Actual income
+across all accounts and categories forms the percentage base; planned income
+is excluded. Transfers do not contribute their principal to spending. A
+transfer fee is already stored once as a linked Fees expense and counts once
+when it meets the budget date and eligibility rules. Kuwi currently has no FX
+quote source, so progress is unavailable when qualifying expenses or income
+use a currency different from the profile's preferred currency.
+
 The app derives Debit and Assets balances from adjustments, expenses, posted
 income, and transfer principal. Expenses reduce those balances; posted income
 adds to them. Credit expenses increase the amount owed and posted income lowers
@@ -65,21 +82,23 @@ be edited or deleted as ordinary expenses.
 ## Backup contract
 
 Exports use a JSON envelope with `format: "kuwi.backup"`, backup `version: 1`,
-`schemaVersion: 6`, an ISO `exportedAt`, and an integrity object with
+`schemaVersion: 7`, an ISO `exportedAt`, and an integrity object with
 `algorithm: "SHA-256"` and a lowercase digest. The digest covers the canonical
 JSON form of `format`, `version`, `schemaVersion`, and `data`. Object keys are
 sorted recursively before hashing, and array order is retained.
 
-Current v6 data includes currencies, profiles, accounts, adjustments, setup,
+Current v7 data includes currencies, profiles, accounts, adjustments, setup,
 pending account operations, expense categories and records, pending expense
 sync markers, income categories and records, pending income sync markers,
-transfers, pending transfer operations, and transaction edit/delete receipts.
+transfers, pending transfer operations, transaction edit/delete receipts,
+canonical budget definitions, and pending budget operation receipts.
 The exported `fee_amount_minor` is derived from the linked fee expense. Joined
 labels and balances are also derived.
 
 Restore accepts v3 backups without income or transfer relations, v4 backups
 from income-only and transfer-only builds, v4 backups containing both feature
-sets, v5 backups with transaction receipts, and current v6 backups. It checks
+sets, v5 backups with transaction receipts, v6 backups with transfer data, and
+current v7 backups. Older backups gain empty budget relations. It checks
 the digest, exact relation fields,
 SQLite value constraints, unique keys, and references before replacing data.
 Legacy formats gain canonical empty relations when restored. A transfer backup
