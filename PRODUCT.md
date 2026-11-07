@@ -55,10 +55,11 @@ explicit. These are delivery goals, not claims that the features already ship.
 
 The app in `apps/kuwi` implements local onboarding, accounts, expenses,
 ordinary income, same-currency transfers, category budgets, and backup/restore.
-These workflows use local SQLite storage. Browser journeys for the current
-integrated build and physical iPhone acceptance for finance workflows remain
-pending. Home, grouped Wallet, wider currency transfer, and the remaining
-finance workflows are outstanding. Clerk and Convex are not provisioned.
+These workflows use local SQLite storage. The integrated browser suite passes
+in Chromium and WebKit, including real-persistence budget and backup journeys.
+Physical iPhone acceptance for finance workflows remains pending. Home, grouped
+Wallet, wider currency transfer, and the remaining finance workflows are
+outstanding. Clerk and Convex are not provisioned.
 
 Use the accepted Expo, React Native Web, Expo Router, and Reanimated client.
 Keep durable local data in SQLite/WASM with OPFS SAHPool. Convex is the selected

@@ -112,12 +112,12 @@ const test = base.extend({
       if (storageFault.current === "downgrade-v2")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE transfers; DROP TABLE incomes; DROP TABLE income_categories; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_budget_operations; DROP TABLE budgets; DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE transfers; DROP TABLE incomes; DROP TABLE income_categories; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "downgrade-v3")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV3") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; DROP INDEX expenses_one_fee_per_transfer; ALTER TABLE expenses DROP COLUMN transfer_id; DROP TABLE transfers; PRAGMA user_version=3;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV3") { transaction(() => db.exec("DROP TABLE pending_budget_operations; DROP TABLE budgets; DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; DROP INDEX expenses_one_fee_per_transfer; ALTER TABLE expenses DROP COLUMN transfer_id; DROP TABLE transfers; PRAGMA user_version=3;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "account-rename")
         return source.replace(

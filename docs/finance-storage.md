@@ -54,13 +54,15 @@ under that ID fails. Amount edits preserve a rollover start, while changing
 the interval or bi-weekly anchors starts a new rollover span.
 
 Progress comes from eligible expense and income rows each time it is read.
-Expenses count across accounts by category and inclusive period. Actual income
-across all accounts and categories forms the percentage base; planned income
-is excluded. Transfers do not contribute their principal to spending. A
-transfer fee is already stored once as a linked Fees expense and counts once
-when it meets the budget date and eligibility rules. Kuwi currently has no FX
-quote source, so progress is unavailable when qualifying expenses or income
-use a currency different from the profile's preferred currency.
+Expenses count across accounts by category and inclusive period. Monthly periods
+currently start on day 1; Kuwi does not expose the WEB reference's configurable
+monthly start day. Actual income across all accounts and categories forms the
+percentage base; planned income is excluded. Transfers do not contribute their
+principal to spending. A transfer fee is already stored once as a linked Fees
+expense and counts once when it meets the budget date and eligibility rules.
+Kuwi currently has no FX quote source, so progress is unavailable when
+qualifying expenses or income use a currency different from the profile's
+preferred currency.
 
 The app derives Debit and Assets balances from adjustments, expenses, posted
 income, and transfer principal. Expenses reduce those balances; posted income

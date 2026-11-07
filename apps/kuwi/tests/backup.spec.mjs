@@ -304,6 +304,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const incomeOnlyBackup = structuredClone(backup);
     incomeOnlyBackup.schemaVersion = 4;
+    delete incomeOnlyBackup.data.budgets;
+    delete incomeOnlyBackup.data.pendingBudgetOperations;
     const linkedFeeIds = new Set(
       incomeOnlyBackup.data.expenses.filter((expense) => expense.transfer_id).map(({ id }) => id),
     );
@@ -324,6 +326,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const transferOnlyBackup = structuredClone(backup);
     transferOnlyBackup.schemaVersion = 4;
+    delete transferOnlyBackup.data.budgets;
+    delete transferOnlyBackup.data.pendingBudgetOperations;
     delete transferOnlyBackup.data.incomeCategories;
     delete transferOnlyBackup.data.incomes;
     delete transferOnlyBackup.data.pendingIncomeSyncOperations;
@@ -337,6 +341,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const v4Backup = structuredClone(backup);
     v4Backup.schemaVersion = 4;
+    delete v4Backup.data.budgets;
+    delete v4Backup.data.pendingBudgetOperations;
     delete v4Backup.data.pendingTransactionOperations;
     await restoreFile(page, {
       name: "combined-v4.kuwi.json",
@@ -347,6 +353,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const receiptOnlyV5Backup = structuredClone(backup);
     receiptOnlyV5Backup.schemaVersion = 5;
+    delete receiptOnlyV5Backup.data.budgets;
+    delete receiptOnlyV5Backup.data.pendingBudgetOperations;
     const v5TransferFeeIds = new Set(
       receiptOnlyV5Backup.data.expenses
         .filter(({ transfer_id }) => transfer_id)
@@ -368,6 +376,8 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const legacyBackup = structuredClone(backup);
     legacyBackup.schemaVersion = 3;
+    delete legacyBackup.data.budgets;
+    delete legacyBackup.data.pendingBudgetOperations;
     delete legacyBackup.data.incomeCategories;
     delete legacyBackup.data.incomes;
     delete legacyBackup.data.pendingIncomeSyncOperations;

@@ -84,9 +84,11 @@ The recovered budget rules come from static Tarsi WEB code. Tarsi iPhone 2.5.9
 acceptance remains pending. Kuwi's budget screen covers built-in expense
 categories; custom and hidden categories, subcategory budgets, and Pro
 entitlements are outside the current app. Cross-currency progress stays
-unavailable because Kuwi has no exchange-quote source. A real-persistence
-budget journey is included in the Playwright suite; sequential browser and
-physical iPhone validation are pending.
+unavailable because Kuwi has no exchange-quote source. Monthly periods start
+on day 1; Kuwi does not expose the WEB reference's configurable start day. A
+real-persistence budget journey passes in Chromium and disk-backed WebKit.
+Physical iPhone acceptance for budget screens, calculations, and backup round
+trips remains pending.
 
 The six observed currency tiles are PHP, USD, EUR, GBP, JPY, and TWD. PHP, Cash,
 and zero are the defaults. JPY uses whole units; the other enabled currencies
@@ -126,22 +128,21 @@ Build Output configuration. Local Vercel credentials and environment files
 are ignored. The earlier Cloudflare storage probe remains a separate test.
 No Cloudflare product deployment or storage migration was needed.
 
-## Validation on 2026-11-07
+## Validation on 2026-11-08
 
-Before category budgets were added, `npm exec --yes --package=pnpm@11.25.0 --
-pnpm check` passed lint, TypeScript, the static build, and all 90 Playwright
-journeys against real OPFS storage: 45 in Chromium and 45 in WebKit. WebKit
-retained OPFS data for the same origin after a persistent context closed and a
-second profile opened. The test servers use a unique `.localhost` hostname for
-each journey, so separate runs cannot reopen another journey's database
-through a reused port.
+`npm exec --yes --package=pnpm@11.25.0 -- pnpm check` passed lint, TypeScript,
+the static build, five budget calculation tests, and 122 Playwright journeys
+against real OPFS storage: 61 in Chromium and 61 in WebKit. WebKit retained
+OPFS data for the same origin after a persistent context closed and a second
+profile opened. Each journey uses a unique `.localhost` hostname so a reused
+port cannot expose another journey's database.
 
-Coverage includes income posting and retries, transaction corrections and
-deletion, backup downloads and file selection, integrity and reference checks,
-rollback, migration recovery, offline reopening, and another write. Physical
-iPhone Files and income acceptance remain pending. The new budget journeys are
-waiting for a fresh sequential browser run because concurrent runs can time
-out during WebKit startup.
+Coverage includes budget creation, corrected-ledger progress, percentage
+income limits, transfer fees, zero clears, version 7 backup export and restore,
+atomic failure recovery, stable retries, and offline reopen. The wider suite
+also checks income posting, transaction corrections and deletion, backup
+validation, migration recovery, and another offline write. Physical iPhone
+Files, budget, and income acceptance remain pending.
 
 Physical iPhone installation, offline reopening, and populated Safari ownership
 handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2

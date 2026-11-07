@@ -801,11 +801,11 @@ async function validateBackup(backup) {
     ? Object.keys(data).sort().join("\0")
     : "";
   const keysFor = (relations) => [...relations].sort().join("\0");
-  const hasIncomeRelations = [incomeRelations, combinedRelations, incomeTransactionRelations, combinedTransactionRelations]
+  const hasIncomeRelations = [incomeRelations, combinedRelations, incomeTransactionRelations, combinedTransactionRelations, currentRelations]
     .some((relations) => relationKeys === keysFor(relations));
-  const hasTransferRelations = [transferRelations, combinedRelations, transferTransactionRelations, combinedTransactionRelations]
+  const hasTransferRelations = [transferRelations, combinedRelations, transferTransactionRelations, combinedTransactionRelations, currentRelations]
     .some((relations) => relationKeys === keysFor(relations));
-  const hasTransactionOperations = [incomeTransactionRelations, transferTransactionRelations, combinedTransactionRelations]
+  const hasTransactionOperations = [incomeTransactionRelations, transferTransactionRelations, combinedTransactionRelations, currentRelations]
     .some((relations) => relationKeys === keysFor(relations));
   const supportedRelations = backup.schemaVersion === legacyBackupSchemaVersion
     ? [legacyRelations]

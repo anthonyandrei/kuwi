@@ -1,5 +1,8 @@
 import { Buffer } from "node:buffer";
-import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test as base, expect, chromium, webkit } from "@playwright/test";
 import { startServer } from "../scripts/serve.mjs";
 
@@ -29,10 +32,29 @@ const test = base.extend({
     });
     await new Promise((resolve) => server.once("listening", resolve));
     try {
-      await provide(`http://127.0.0.1:${server.address().port}`);
+      await provide(`http://kuwi-${randomUUID()}.localhost:${server.address().port}`);
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
+    }
+  },
+  /** Use a persistent WebKit profile so the budget journey exercises real OPFS storage. */
+  context: async ({ browser, browserName, baseURL }, provide) => {
+    const profile = browserName === "webkit"
+      ? await mkdtemp(join(tmpdir(), "kuwi-budget-webkit-"))
+      : null;
+    let context;
+    try {
+      if (browserName === "webkit")
+        context = await webkit.launchPersistentContext(profile, { baseURL });
+      else context = await browser.newContext({ baseURL });
+      await provide(context);
+    } finally {
+      try {
+        await context?.close();
+      } finally {
+        if (profile) await rm(profile, { recursive: true, force: true });
+      }
     }
   },
 });
@@ -72,7 +94,7 @@ async function setFixedBudget(page, category, amount) {
  */
 async function openBudgets(page) {
   await page.getByRole("button", { name: "Budgets", exact: true }).click();
-  await expect(page.getByRole("header", { name: "Budgets", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Budgets", level: 1 })).toBeVisible();
 }
 
 test("budget progress follows corrected expenses, income, and transfer fees after offline reopening and restore", async ({
@@ -109,8 +131,8 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await page.getByRole("button", { name: "Save changes", exact: true }).click();
     await page.getByRole("button", { name: "Back to account", exact: true }).click();
     await openBudgets(page);
-    await expect(page.getByText("20% used", { exact: true })).toBeVisible();
-    await expect(page.getByText("₱980.00 remaining", { exact: true })).toBeVisible();
+    await expect(page.getByText("2% used")).toBeVisible();
+    await expect(page.getByText("₱980.00 remaining")).toBeVisible();
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
@@ -132,20 +154,26 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await page.getByRole("radio", { name: "Percentage of income", exact: true }).click();
     await page.getByLabel("Budget percentage", { exact: true }).fill("10");
     await page.getByRole("button", { name: "Save budget", exact: true }).click();
-    await expect(page.getByText("10% used", { exact: true })).toBeVisible();
-    await expect(page.getByText("₱45.00 remaining", { exact: true })).toBeVisible();
+    await expect(page.getByText("10% used")).toBeVisible();
+    await expect(page.getByText("₱45.00 remaining")).toBeVisible();
 
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
     await page.getByRole("button", { name: "Close database", exact: true }).click();
+    await page.evaluate(async () => {
+      await navigator.serviceWorker.ready;
+    });
     await context.close();
 
-    context = await browserType.launchPersistentContext(directory, { baseURL });
+    context = await browserType.launchPersistentContext(directory, {
+      baseURL,
+      offline: true,
+    });
     page = await context.newPage();
     await page.goto("/");
     await openBudgets(page);
-    await expect(page.getByText("20% used", { exact: true })).toBeVisible();
-    await expect(page.getByText("10% used", { exact: true })).toBeVisible();
+    await expect(page.getByText("2% used")).toBeVisible();
+    await expect(page.getByText("10% used")).toBeVisible();
 
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
     const downloadPromise = page.waitForEvent("download");
@@ -179,7 +207,7 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     });
     await expect(page.getByText("Backup restored.", { exact: true })).toBeVisible();
     await openBudgets(page);
-    await expect(page.getByText("20% used", { exact: true })).toBeVisible();
+    await expect(page.getByText("2% used")).toBeVisible();
   } finally {
     await context.close();
   }
