@@ -49,6 +49,13 @@ const test = base.extend({
           'if(!self.__accountUpdateFailed){self.__accountUpdateFailed=true;throw Error("Simulated account update failure");} db.exec({sql: "UPDATE accounts SET name=',
         );
       }
+      if (storageFault.current === "transferMigration") {
+        storageFault.current = null;
+        return source.replace(
+          '      PRAGMA user_version=4;\n    `);\n  });\n}',
+          '      PRAGMA user_version=4;\n    `);\n    throw Error("Simulated transfer migration failure");\n  });\n}',
+        );
+      }
       if (storageFault.current === "migrateV1" || storageFault.current === "failV1Migration") {
         const failMigration = storageFault.current === "failV1Migration";
         storageFault.current = null;
@@ -191,7 +198,10 @@ test("a legacy expense and backup survive the shell update", async ({
     await expect(page.getByRole("status")).toHaveText("Database closed");
 
     storageFault.legacyBuild = false;
+    storageFault.current = "transferMigration";
     await page.goto("/");
+    await expect(page.getByRole("alert")).toContainText("Simulated transfer migration failure");
+    await page.reload();
     await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
     await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash" }).click();
@@ -199,6 +209,45 @@ test("a legacy expense and backup survive the shell update", async ({
     await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Back to account" }).click();
     await page.getByRole("button", { name: "Back to accounts" }).click();
+
+    await page.getByRole("button", { name: "Add account" }).click();
+    await page.getByLabel("Account name").fill("Reserve");
+    await page.getByRole("button", { name: "Save account" }).click();
+    await page.getByRole("button", { name: "View account Cash" }).click();
+    await page.getByRole("button", { name: "Transfer between accounts" }).click();
+    await page.getByLabel("To account").selectOption({ label: "Reserve" });
+    await page.getByLabel("Transfer amount").fill("100");
+    await page.getByLabel("Transfer fee (optional)").fill("4.56");
+    await page.getByLabel("Transfer note").fill("Updated schema transfer");
+    const tomorrow = await page.evaluate(() => {
+      const date = new Date();
+      date.setDate(date.getDate() + 1);
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    });
+    await page.getByLabel("Transfer date").fill(tomorrow);
+    await page.getByRole("button", { name: "Save transfer" }).click();
+    await expect(page.getByText("₱1,120.00", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to accounts" }).click();
+    await page.getByRole("button", { name: "View account Cash" }).click();
+    await page.getByRole("button", { name: "Transaction history" }).click();
+    await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
+    await expect(page.getByText("Updated schema transfer", { exact: true })).toBeVisible();
+    await expect(page.getByText("Bank transfer fee to Reserve", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to account" }).click();
+    await page.getByRole("button", { name: "Back to accounts" }).click();
+
+    const currentDownloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export backup" }).click();
+    const currentDownload = await currentDownloadPromise;
+    const currentBackup = JSON.parse(readFileSync(await currentDownload.path(), "utf8"));
+    expect(currentBackup).toMatchObject({
+      schemaVersion: 4,
+      data: {
+        expenses: expect.arrayContaining([expect.objectContaining({ transfer_id: expect.any(String) })]),
+        transfers: [expect.objectContaining({ fee_amount_minor: 456, note: "Updated schema transfer" })],
+        pendingTransferOperations: [expect.objectContaining({ operation_id: expect.any(String) })],
+      },
+    });
 
     const chooserPromise = page.waitForEvent("filechooser");
     await page.getByRole("button", { name: "Restore backup" }).click();

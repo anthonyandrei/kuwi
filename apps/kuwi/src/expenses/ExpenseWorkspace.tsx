@@ -25,9 +25,9 @@ function formatMoney(minor: number, currency: string, digits: number): string {
 }
 
 /**
- * Render an expense form or saved history for one account.
+ * Render an expense form or saved transaction history for one account.
  * @param mode - Whether to show the entry form or history list.
- * @param ledger - The selected account, category inventory, and saved expenses.
+ * @param ledger - The selected account, categories, expenses, and transfers.
  * @param onBack - Return to the selected account screen.
  * @param onLedgerChange - Publish the refreshed ledger after a successful save.
  */
@@ -85,7 +85,13 @@ export function ExpenseWorkspace({
     }
   }
 
-  if (mode === "history")
+  if (mode === "history") {
+    const history = [
+      ...ledger.expenses.map((expense) => ({ kind: "expense" as const, date: expense.date, createdAt: expense.created_at, id: expense.id, expense })),
+      ...ledger.transfers.map((transfer) => ({ kind: "transfer" as const, date: transfer.date, createdAt: transfer.created_at, id: transfer.id, transfer })),
+    ].sort((left, right) =>
+      right.date.localeCompare(left.date) || right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id),
+    );
     return (
       <View style={styles.content}>
         <Pressable accessibilityRole="button" onPress={onBack} style={styles.back}>
@@ -98,23 +104,34 @@ export function ExpenseWorkspace({
             {formatMoney(account.balance_minor, currency, account.decimal_places)}
           </Text>
         </View>
-        {ledger.expenses.length === 0 ? (
-          <Text style={styles.copy}>Your saved expenses will appear here.</Text>
+        {history.length === 0 ? (
+          <Text style={styles.copy}>Your saved transactions will appear here.</Text>
         ) : (
           <ScrollView style={styles.history}>
-            {ledger.expenses.map((expense) => (
-              <View key={expense.id} style={styles.entry}>
+            {history.map((item) => item.kind === "expense" ? (
+              <View key={`expense:${item.id}`} style={styles.entry}>
+                <View style={styles.entryCopy}>
+                  <Text style={styles.entryTitle}>{item.expense.note || item.expense.category_label}</Text>
+                  <Text style={styles.meta}>{item.expense.category_label} · {item.date} · {account.name}</Text>
+                </View>
+                <Text style={styles.entryAmount}>
+                  {formatMoney(item.expense.amount_minor, currency, account.decimal_places)}
+                </Text>
+              </View>
+            ) : (
+              <View key={`transfer:${item.id}`} style={styles.entry}>
                 <View style={styles.entryCopy}>
                   <Text style={styles.entryTitle}>
-                    {expense.note || expense.category_label}
+                    {item.transfer.direction === "outgoing"
+                      ? `Transfer to ${item.transfer.to_account_name}`
+                      : `Transfer from ${item.transfer.from_account_name}`}
                   </Text>
-                  <Text style={styles.meta}>
-                    {expense.category_label} · {expense.date} · {account.name}
-                  </Text>
+                  <Text style={styles.meta}>{item.date} · {account.name}</Text>
+                  {item.transfer.note ? <Text style={styles.meta}>{item.transfer.note}</Text> : null}
                 </View>
                 <Text style={styles.entryAmount}>
                   {formatMoney(
-                    expense.amount_minor,
+                    item.transfer.direction === "outgoing" ? -item.transfer.amount_minor : item.transfer.amount_minor,
                     currency,
                     account.decimal_places,
                   )}
@@ -125,6 +142,7 @@ export function ExpenseWorkspace({
         )}
       </View>
     );
+  }
 
   return (
     <View style={styles.content}>

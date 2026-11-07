@@ -110,6 +110,15 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     await page.getByLabel("Account name", { exact: true }).fill("Reserve");
     await page.getByRole("button", { name: "Save account", exact: true }).click();
     await expect(page.getByText("Reserve", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+    await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+    await page.getByLabel("To account", { exact: true }).selectOption({ label: "Reserve" });
+    await page.getByLabel("Transfer amount", { exact: true }).fill("25");
+    await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("1.25");
+    await page.getByLabel("Transfer note", { exact: true }).fill("Reserve move");
+    await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+    await expect(page.getByText("₱961.75", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
@@ -119,7 +128,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     expect(backup).toMatchObject({
       format: "kuwi.backup",
       version: 1,
-      schemaVersion: 3,
+      schemaVersion: 4,
       integrity: { algorithm: "SHA-256" },
       data: {
         profiles: [{ preferred_name: "Anthony", preferred_currency: "PHP" }],
@@ -128,13 +137,18 @@ test("backup round trip rejects bad files and reopens offline with the restored 
           expect.objectContaining({ name: "Reserve", currency_code: "PHP" }),
         ]),
         categories: expect.arrayContaining([expect.objectContaining({ id: "food", label: "Food" })]),
-        expenses: [expect.objectContaining({ note: "Coffee", amount_minor: 1200 })],
+        expenses: expect.arrayContaining([
+          expect.objectContaining({ note: "Coffee", amount_minor: 1200, transfer_id: null }),
+          expect.objectContaining({ note: "Bank transfer fee to Reserve", amount_minor: 125, transfer_id: expect.any(String) }),
+        ]),
+        transfers: [expect.objectContaining({ note: "Reserve move", amount_minor: 2500, fee_amount_minor: 125 })],
         pendingOperations: expect.arrayContaining([
           expect.objectContaining({ operation_type: "account.create" }),
         ]),
         pendingSyncOperations: expect.arrayContaining([
           expect.objectContaining({ operation_id: backup.data.expenses[0].id }),
         ]),
+        pendingTransferOperations: [expect.objectContaining({ operation_id: backup.data.transfers[0].id })],
       },
     });
 
@@ -143,7 +157,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     await page.getByLabel("Expense amount", { exact: true }).fill("5");
     await page.getByLabel("Expense note", { exact: true }).fill("Water");
     await page.getByRole("button", { name: "Save expense", exact: true }).click();
-    await expect(page.getByText("₱983.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱956.75", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     await restoreFile(page, {
@@ -152,7 +166,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from("not a Kuwi backup"),
     });
     await expect(page.getByRole("alert")).toContainText("not valid JSON");
-    await expect(page.getByText("₱983.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱956.75", { exact: true })).toBeVisible();
 
     const broken = { ...backup, data: { ...backup.data, expenses: [] } };
     await restoreFile(page, {
@@ -161,7 +175,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(broken)),
     });
     await expect(page.getByRole("alert")).toContainText("integrity");
-    await expect(page.getByText("₱983.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱956.75", { exact: true })).toBeVisible();
 
     const badReference = structuredClone(backup);
     badReference.data.expenses[0].account_id = "missing-account";
@@ -171,7 +185,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(badReference))),
     });
     await expect(page.getByRole("alert")).toContainText("reference");
-    await expect(page.getByText("₱983.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱956.75", { exact: true })).toBeVisible();
 
     const duplicateCurrency = structuredClone(backup);
     duplicateCurrency.data.currencies[1] = { ...duplicateCurrency.data.currencies[0] };
@@ -181,17 +195,17 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(duplicateCurrency))),
     });
     await expect(page.getByRole("alert")).toContainText("currencies contains duplicate code");
-    await expect(page.getByText("₱983.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱956.75", { exact: true })).toBeVisible();
 
     const futureExpense = structuredClone(backup);
-    futureExpense.data.expenses[0].date = "9999-12-31";
+    futureExpense.data.expenses.find((expense) => expense.transfer_id === null).date = "9999-12-31";
     await restoreFile(page, {
       name: "future-expense.kuwi.json",
       mimeType: "application/json",
       buffer: Buffer.from(JSON.stringify(withValidDigest(futureExpense))),
     });
     await expect(page.getByRole("alert")).toContainText("expense date is invalid");
-    await expect(page.getByText("₱983.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱956.75", { exact: true })).toBeVisible();
 
     const unsupported = { ...backup, version: 99 };
     await restoreFile(page, {
@@ -200,23 +214,25 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(unsupported)),
     });
     await expect(page.getByRole("alert")).toContainText("version");
-    await expect(page.getByText("₱983.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱956.75", { exact: true })).toBeVisible();
 
     await restoreFile(page, {
       name: "my-ledger.json",
       mimeType: "text/plain",
       buffer: Buffer.from(backupText),
     });
-    await expect(page.getByText("₱988.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱961.75", { exact: true })).toBeVisible();
     await restoreFile(page, {
       name: "same-ledger-again.json",
       mimeType: "application/json",
       buffer: Buffer.from(backupText),
     });
-    await expect(page.getByText("₱988.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱961.75", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash", exact: true }).click();
     await page.getByRole("button", { name: "Transaction history", exact: true }).click();
     await expect(page.getByText("Coffee", { exact: true })).toBeVisible();
+    await expect(page.getByText("Reserve move", { exact: true })).toBeVisible();
+    await expect(page.getByText("Bank transfer fee to Reserve", { exact: true })).toBeVisible();
     await expect(page.getByText("Water", { exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Back to account", exact: true }).click();
 
@@ -226,7 +242,9 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     const restoredDownload = await restoredDownloadPromise;
     const restoredBackup = JSON.parse(await (await import("node:fs/promises")).readFile(await restoredDownload.path(), "utf8"));
     expect(restoredBackup.data.expenses.map(({ id }) => id)).toEqual(backup.data.expenses.map(({ id }) => id));
+    expect(restoredBackup.data.transfers).toEqual(backup.data.transfers);
     expect(restoredBackup.data.pendingSyncOperations).toEqual(backup.data.pendingSyncOperations);
+    expect(restoredBackup.data.pendingTransferOperations).toEqual(backup.data.pendingTransferOperations);
     expect(restoredBackup.data.pendingOperations.map(({ id }) => id)).toEqual(backup.data.pendingOperations.map(({ id }) => id));
 
     await page.evaluate(async () => { await navigator.serviceWorker.ready; });
@@ -237,16 +255,18 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     });
     page = await context.newPage();
     await page.goto("/");
-    await expect(page.getByText("₱988.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱961.75", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash", exact: true }).click();
     await page.getByRole("button", { name: "Add expense", exact: true }).click();
     await page.getByLabel("Expense amount", { exact: true }).fill("2");
     await page.getByLabel("Expense note", { exact: true }).fill("Offline tea");
     await page.getByRole("button", { name: "Save expense", exact: true }).click();
-    await expect(page.getByText("₱986.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱959.75", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Transaction history", exact: true }).click();
     await expect(page.getByText("Coffee", { exact: true })).toBeVisible();
     await expect(page.getByText("Offline tea", { exact: true })).toBeVisible();
+    await expect(page.getByText("Reserve move", { exact: true })).toBeVisible();
+    await expect(page.getByText("Bank transfer fee to Reserve", { exact: true })).toBeVisible();
   } finally {
     await context.close();
   }

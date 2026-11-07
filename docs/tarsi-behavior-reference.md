@@ -169,12 +169,68 @@ resolution. Evidence is static and platform-specific. No runtime validation,
 native comparison, minimum historical date, or linked-effect rule beyond the
 eligible cashback path is claimed.
 
-Transfers reject nonpositive amounts, identical source/destination accounts,
-missing accounts, and failed eligibility checks. The action rounds source and
-received amounts in their respective currencies. A positive fee becomes a
-linked expense in the fees category. The returned state updates both account
-balances, the transfer, and the fee expense together. Exact eligibility,
-available-balance limits, and exchange-rate UI rules need further tracing.
+### Same-currency account transfers
+
+Checked 2026-11-07 by static inspection of the shipped web transfer chunk,
+common-bundle modules 1685, 1701, 1709, and 1731, and the currency/transfer
+helpers loaded by the route. The [index bundle](https://web.tarsi.cloud/_expo/static/js/web/index-32d1e7797d0f640bdef7cc274d2a7443.js)
+maps `/(tabs)/transfer` to the
+[transfer chunk](https://web.tarsi.cloud/_expo/static/js/web/transfer-2dbf20b142412a934fd581303887e2c8.js),
+module 3409. Its SHA-256 is
+`31fad8f4a717e471749ccaa253a9029f3ed2a0e8ac3dda70e57e752c87ca8ac0`.
+The route calls the store action from module 1731 in the
+[common bundle](https://web.tarsi.cloud/_expo/static/js/web/__common-d31990bcc79fe8c4b0213bb913c4a7e9.js).
+That action uses account normalization and available-balance helpers from
+module 1709 and currency rounding from module 1701. The extracted common-bundle
+modules are retained under
+`/Users/drei/Library/Caches/kuwi-research/tarsi-focused-modules-20261107/`.
+The downloaded route chunk used for this pass was `/tmp/tarsi-transfer.js`.
+
+The account-transfer branch requires a source and a distinct destination. Its
+source predicate accepts debit and credit accounts; the destination predicate
+accepts debit accounts. The form compares currencies to decide whether to show
+exchange-rate and received-amount fields. This ticket's same-currency path uses
+one amount for the source deduction and destination receipt. Asset accounts,
+external transfers, and cross-currency transfers are separate paths.
+
+The form rejects amounts at or below zero and fees below zero or not finite.
+Blank fees resolve to zero. The store rounds transfer and fee amounts using
+the source currency's minor-unit rule. The shipped currency helper uses zero
+fractional digits for JPY, KRW, and CLP, three for KWD, BHD, and OMR, and two
+for other currencies. Kuwi currently supports PHP, USD, EUR, GBP, TWD at two
+digits and JPY at zero. The transfer form's currency formatter removes
+non-numeric characters and truncates extra fractional digits to the selected
+currency precision.
+
+Available funds are the source's balance for debit accounts and
+`creditLimit - balance` for credit accounts. The form rounds this figure and
+requires it to cover the transfer amount plus fee. Its visible errors are
+“Not enough balance” for debit accounts and “Not enough available credit” for
+credit accounts. The store repeats eligibility and available-funds checks
+before producing a new state.
+
+A positive fee creates a separate expense with category `fees`, the same
+account, date, and creation time as the transfer. Its note is “Bank transfer
+fee to <destination name>” and the transfer stores the fee amount and expense
+ID. A zero fee creates no expense. The transfer reduces the source balance by
+the amount plus fee and increases the debit destination by the transfer
+amount. For example, moving PHP 1,000 from Cash with a PHP 25 fee lowers Cash by
+PHP 1,025, raises the destination by PHP 1,000, and records a PHP 25 Fees
+expense. With no fee, the source falls by PHP 1,000 and no fee expense exists.
+The action updates both accounts and inserts the transfer and optional fee
+expense in the same returned state.
+
+The helper defaults a missing date to today and the transfer action applies
+the balance changes without a future-date/planned check. The fee expense has no
+budget-exclusion flag. The traced budget aggregator includes expenses unless
+they are marked planned or `affectsSpending: false`, so the fee is counted as
+spending and the transfer principal is not an expense. Kuwi's budget workflow
+is not implemented yet; this describes the recovered web rules only.
+
+Evidence is static web source, not an executed transfer or an iPhone
+observation. The iPhone transfer flow and keyboard behavior remain pending
+acceptance. This trace does not establish cross-currency transfer rules,
+transfer-edit/deletion behavior, or a native date boundary.
 
 ## Device persistence
 

@@ -30,11 +30,28 @@ export type ExpenseRecord = {
   date: string;
   note: string | null;
   created_at: string;
+  transfer_id: string | null;
+};
+export type TransferRecord = {
+  id: string;
+  operation_id: string;
+  from_account_id: string;
+  from_account_name: string;
+  to_account_id: string;
+  to_account_name: string;
+  amount_minor: number;
+  date: string;
+  note: string | null;
+  created_at: string;
+  fee_expense_id: string | null;
+  fee_amount_minor: number;
+  direction: "incoming" | "outgoing";
 };
 export type ExpenseLedger = {
   account: Account;
   categories: ExpenseCategory[];
   expenses: ExpenseRecord[];
+  transfers: TransferRecord[];
 };
 export type CreateExpenseInput = {
   operationId: string;
@@ -45,6 +62,20 @@ export type CreateExpenseInput = {
   note?: string;
 };
 export type CreateExpenseResult = { ledger: ExpenseLedger; replayed: boolean };
+export type CreateTransferInput = {
+  operationId: string;
+  fromAccountId: string;
+  toAccountId: string;
+  amountMinor: number;
+  feeMinor: number;
+  date: string;
+  note?: string;
+};
+export type CreateTransferResult = {
+  accounts: Account[];
+  ledger: ExpenseLedger;
+  replayed: boolean;
+};
 export type BackupCurrency = { code: string; decimal_places: number };
 export type BackupProfile = {
   id: string;
@@ -88,8 +119,20 @@ export type BackupExpense = {
   date: string;
   note: string | null;
   created_at: string;
+  transfer_id: string | null;
+};
+export type BackupTransfer = {
+  id: string;
+  from_account_id: string;
+  to_account_id: string;
+  amount_minor: number;
+  fee_amount_minor: number;
+  date: string;
+  note: string | null;
+  created_at: string;
 };
 export type BackupPendingSyncOperation = { operation_id: string };
+export type BackupPendingTransferOperation = { operation_id: string; request_fingerprint: string };
 export type ProductBackupData = {
   currencies: BackupCurrency[];
   profiles: BackupProfile[];
@@ -99,12 +142,14 @@ export type ProductBackupData = {
   pendingOperations: BackupPendingAccountOperation[];
   categories: BackupCategory[];
   expenses: BackupExpense[];
+  transfers: BackupTransfer[];
   pendingSyncOperations: BackupPendingSyncOperation[];
+  pendingTransferOperations: BackupPendingTransferOperation[];
 };
 export type ProductBackup = {
   format: "kuwi.backup";
   version: 1;
-  schemaVersion: 3;
+  schemaVersion: 4;
   exportedAt: string;
   integrity: { algorithm: "SHA-256"; digest: string };
   data: ProductBackupData;
@@ -116,6 +161,7 @@ export type DatabaseResult =
   | Account
   | ExpenseLedger
   | CreateExpenseResult
+  | CreateTransferResult
   | ProductBackup
   | null;
 
@@ -148,12 +194,12 @@ function stopWorker(error: Error) {
  * Send a worker command and surface its result or failure to the caller.
  * Writes time out after 15 seconds so callers can retry with the same operation ID;
  * reads wait up to 60 seconds for OPFS initialization.
- * @param command - A supported setup, account, ledger, expense, backup, or close command.
+ * @param command - A supported setup, account, ledger, transfer, expense, backup, or close command.
  * @param args - Command-specific values sent to the dedicated database worker.
  * @returns The typed command result; the promise rejects on worker errors or timeout.
  */
 export function database<T extends DatabaseResult = DatabaseResult>(
-  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "exportBackup" | "restoreBackup" | "close",
+  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "createTransfer" | "exportBackup" | "restoreBackup" | "close",
   args: object = {},
 ): Promise<T> {
   if (!worker) {
@@ -170,7 +216,7 @@ export function database<T extends DatabaseResult = DatabaseResult>(
   }
   return new Promise((resolve, reject) => {
     const id = ++sequence;
-    const isWrite = command === "complete" || command === "createExpense" || command === "restoreBackup" || command.startsWith("account.");
+    const isWrite = command === "complete" || command === "createExpense" || command === "createTransfer" || command === "restoreBackup" || command.startsWith("account.");
     const timer = setTimeout(
       () =>
         stopWorker(
@@ -178,7 +224,9 @@ export function database<T extends DatabaseResult = DatabaseResult>(
             isWrite
               ? command === "createExpense"
                 ? "Save confirmation timed out. Retry to check whether your expense was saved."
-              : command === "restoreBackup"
+                : command === "createTransfer"
+                  ? "Save confirmation timed out. Retry to check whether your transfer was saved."
+                  : command === "restoreBackup"
                 ? "Restore confirmation timed out. Reopen your saved data before retrying the backup."
                 : "Save confirmation timed out. Retry the account change to check whether it was saved."
               : "Opening local storage timed out. Retry to reopen existing storage.",

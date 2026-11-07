@@ -19,6 +19,7 @@ import {
   type Setup,
 } from "../storage/client";
 import { ExpenseWorkspace } from "../expenses/ExpenseWorkspace";
+import { TransferWorkspace } from "../transfers/TransferWorkspace";
 const currencies = [
   ["PHP", "Philippine Peso"],
   ["USD", "US Dollar"],
@@ -73,7 +74,7 @@ function formatMoney(amount: number, currency: string) {
 
 type AccountForm = { mode: "create" } | { mode: "edit"; account: Account };
 
-/** Render local setup, manage accounts, and handle backups; storage failures stay visible. */
+/** Render setup, accounts, transfers, and backups while keeping storage failures visible. */
 export default function Home() {
   const [saved, setSaved] = useState<Setup | null>(null),
     [phase, setPhase] = useState("loading");
@@ -98,6 +99,7 @@ export default function Home() {
   const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
   const [expenseLedger, setExpenseLedger] = useState<ExpenseLedger | null>(null);
   const [expenseMode, setExpenseMode] = useState<"expense" | "history" | null>(null);
+  const [transferOpen, setTransferOpen] = useState(false);
   const [backupMessage, setBackupMessage] = useState("");
   /**
    * Reopen the worker and read canonical setup, updating saved data and phase.
@@ -449,7 +451,20 @@ export default function Home() {
         ) : saved ? (
           <View style={s.content}>
             <Text style={s.title}>Welcome, {saved.preferred_name}.</Text>
-            {expenseMode && expenseLedger ? (
+            {transferOpen && selectedAccount ? (
+              <TransferWorkspace
+                accounts={saved.accounts}
+                initialAccount={selectedAccount}
+                onBack={() => setTransferOpen(false)}
+                onTransfer={(result) => {
+                  setSaved((current) => current ? { ...current, accounts: result.accounts } : current);
+                  setSelectedAccount(result.ledger.account);
+                  setExpenseLedger(result.ledger);
+                  setExpenseMode(null);
+                  setTransferOpen(false);
+                }}
+              />
+            ) : expenseMode && expenseLedger ? (
               <ExpenseWorkspace
                 mode={expenseMode}
                 ledger={expenseLedger}
@@ -598,6 +613,9 @@ export default function Home() {
                   </Text>
                 ) : null}
                 {button("Add expense", () => void openExpenseWorkspace("expense"))}
+                {selectedAccount.type !== "assets"
+                  ? button("Transfer between accounts", () => setTransferOpen(true))
+                  : null}
                 {button("Transaction history", () => void openExpenseWorkspace("history"))}
                 {button("Edit account details", () => editAccount(selectedAccount))}
                 {button("Back to accounts", () => setSelectedAccount(null))}
