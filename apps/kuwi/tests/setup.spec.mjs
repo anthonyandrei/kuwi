@@ -36,6 +36,26 @@ const test = base.extend({
           "self.postMessage({ id, result });",
           "if (command !== 'createExpense') self.postMessage({ id, result });",
         );
+      if (storageFault.current === "income-write")
+        return source.replace(
+          /db\.exec\(\{\s*sql: "INSERT INTO incomes/,
+          'if(!globalThis.__incomeWriteFailed){globalThis.__incomeWriteFailed=true;throw Error("Simulated income write failure");} db.exec({sql: "INSERT INTO incomes',
+        );
+      if (storageFault.current === "income-outbox-write")
+        return source.replace(
+          /db\.exec\(\{\s*sql: "INSERT INTO pending_income_sync_operations/,
+          'if(!globalThis.__incomeOutboxFailed){globalThis.__incomeOutboxFailed=true;throw Error("Simulated income pending operation failure");} db.exec({sql: "INSERT INTO pending_income_sync_operations',
+        );
+      if (storageFault.current === "income-interrupt")
+        return source.replace(
+          /db\.exec\(\{\s*sql: "INSERT INTO pending_income_sync_operations/,
+          'while(true) {} db.exec({sql: "INSERT INTO pending_income_sync_operations',
+        );
+      if (storageFault.current === "income-reply")
+        return source.replace(
+          "self.postMessage({ id, result });",
+          "if (command !== 'createIncome') self.postMessage({ id, result });",
+        );
       if (storageFault.current === "interrupt")
         return source.replace(
           /db\.exec\(\{\s*sql: "INSERT INTO accounts VALUES\([^)]+debit[^)]*\)"/,
@@ -51,7 +71,12 @@ const test = base.extend({
       if (storageFault.current === "downgrade-v2")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
+        );
+      if (storageFault.current === "downgrade-v3")
+        return source.replace(
+          'else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV3") { transaction(() => db.exec("DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; PRAGMA user_version=3;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "account-rename")
         return source.replace(
@@ -62,6 +87,11 @@ const test = base.extend({
         return source.replace(
           "function migrateExpenses() {",
           'function migrateExpenses() { if (!globalThis.__migrationFailed) { globalThis.__migrationFailed = true; transaction(() => { db.exec("CREATE TABLE migration_trial(id INTEGER PRIMARY KEY)"); throw Error("Simulated migration failure"); }); }',
+        );
+      if (storageFault.current === "income-migration")
+        return source.replace(
+          "function migrateIncomes() {",
+          'function migrateIncomes() { if (!globalThis.__incomeMigrationFailed) { globalThis.__incomeMigrationFailed = true; transaction(() => { db.exec("CREATE TABLE income_migration_trial(id INTEGER PRIMARY KEY)"); throw Error("Simulated income migration failure"); }); }',
         );
       throw Error("Unknown test fault");
     });
@@ -379,6 +409,38 @@ test("failed version-three migration preserves a version-two account and can reo
   await expect(page.getByText("₱999.00", { exact: true })).toBeVisible();
 });
 
+test("failed income migration preserves version-three expense history", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByRole("button", { name: "Food", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("10");
+  await page.getByLabel("Expense note", { exact: true }).fill("Coffee");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByText("₱990.00", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Close database", exact: true }).click();
+  storageFault.current = "downgrade-v3";
+  await runWorkerCommand(page, "testDowngradeV3");
+  storageFault.current = "income-migration";
+  await page.reload();
+  await expect(page.getByRole("alert")).toContainText(
+    "Simulated income migration failure",
+  );
+
+  storageFault.current = null;
+  await page.reload();
+  await expect(page.getByText("₱990.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Coffee", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Food · .* · Cash/)).toBeVisible();
+});
+
 test("renaming an account leaves linked expense history and balance intact", async ({
   page,
   storageFault,
@@ -416,6 +478,15 @@ async function fundedSetup(page) {
   await page.getByRole("button", { name: "View account Cash", exact: true }).click();
 }
 
+/** Return a browser-local date offset from today for date-only journeys. */
+async function localDateOffset(page, offsetDays) {
+  return page.evaluate((offset) => {
+    const date = new Date();
+    date.setDate(date.getDate() + offset);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }, offsetDays);
+}
+
 test("expense journey saves history and derives the offline account balance", async ({
   page,
 }) => {
@@ -438,6 +509,161 @@ test("expense journey saves history and derives the offline account balance", as
   await expect(page.getByText(/Food ·/)).toBeVisible();
   await expect(page.getByText(new RegExp(yesterday))).toBeVisible();
   await expect(page.getByText("₱12.35", { exact: true })).toBeVisible();
+});
+
+test("income journey saves history and derives the account balance", async ({
+  page,
+}) => {
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("12.345");
+  await page.getByLabel("Income note", { exact: true }).fill("Paycheck");
+  await page.getByRole("button", { name: "Salary", exact: true }).click();
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+
+  await expect(page.getByText("₱1,012.35", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Paycheck", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Salary · .* · Cash/)).toBeVisible();
+  await expect(page.getByText(/₱12.35/)).toBeVisible();
+});
+
+test("JPY income rounds to whole yen in history and the derived balance", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Continue offline", exact: true }).click();
+  await page.getByLabel("Preferred name", { exact: true }).fill("Anthony");
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await page.getByRole("button", { name: "Skip introduction", exact: true }).click();
+  await page.getByRole("button", { name: "JPY Japanese Yen", exact: true }).click();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await page.getByLabel("Opening balance (JPY)", { exact: true }).fill("1000");
+  await page.getByRole("button", { name: "Save my account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("12.5");
+  await page.getByLabel("Income note", { exact: true }).fill("Interest");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+
+  await expect(page.getByText(/(?:JP)?¥1,013/)).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText(/(?:JP)?¥13/)).toBeVisible();
+});
+
+test("income reduces the amount owed on a credit account", async ({ page }) => {
+  await setup(page);
+  await page.getByRole("button", { name: "Save my account", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Credit card");
+  await page.getByRole("radio", { name: "Credit", exact: true }).click();
+  await page.getByLabel("Credit limit (PHP)", { exact: true }).fill("50000");
+  await page.getByRole("button", { name: "Add current balance", exact: true }).click();
+  await page.getByLabel("Current balance (PHP)", { exact: true }).fill("100");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Credit card", exact: true }).click();
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("25");
+  await page.getByLabel("Income note", { exact: true }).fill("Card payment");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+
+  await expect(page.getByText("₱75.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Card payment", { exact: true })).toBeVisible();
+});
+
+test("zero income is accepted only for a future planned date", async ({ page }) => {
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("0");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("greater than zero");
+
+  const tomorrow = await localDateOffset(page, 1);
+  await page.getByLabel("Income date", { exact: true }).fill(tomorrow);
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText(/Income · .* · Cash · Planned/)).toBeVisible();
+  await expect(page.getByText(/₱0.00/)).toBeVisible();
+});
+
+test("a failed income outbox write rolls back before retry", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  storageFault.current = "income-outbox-write";
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("10");
+  await page.getByLabel("Income note", { exact: true }).fill("Paycheck");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Simulated income pending operation failure",
+  );
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+
+  storageFault.current = null;
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByText("₱1,010.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Paycheck", { exact: true })).toHaveCount(1);
+});
+
+test("a lost income reply retries one stable operation", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  storageFault.current = "income-reply";
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("10");
+  await page.getByLabel("Income note", { exact: true }).fill("Paycheck");
+  await page.getByRole("button", { name: "Salary", exact: true }).click();
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Save confirmation timed out");
+
+  storageFault.current = null;
+  await page.getByLabel("Income amount", { exact: true }).fill("15");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "different income details",
+  );
+  await page.getByLabel("Income amount", { exact: true }).fill("10");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByText("₱1,010.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Paycheck", { exact: true })).toHaveCount(1);
+  await expect(page.getByText(/₱10.00/)).toBeVisible();
+});
+
+test("an interrupted income write leaves the ledger available for retry", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  storageFault.current = "income-interrupt";
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("10");
+  await page.getByLabel("Income note", { exact: true }).fill("Paycheck");
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Save confirmation timed out");
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+
+  storageFault.current = null;
+  await expect(async () => {
+    if (await page.getByRole("alert").isVisible())
+      await page.getByRole("button", { name: "Save income", exact: true }).click();
+    await expect(page.getByText("₱1,010.00", { exact: true })).toBeVisible({
+      timeout: 1000,
+    });
+  }).toPass({ timeout: 20000 });
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Paycheck", { exact: true })).toHaveCount(1);
 });
 
 test("JPY expense rounding uses whole yen in history and the derived balance", async ({
@@ -518,7 +744,7 @@ test("failed expense write leaves history and balance unchanged before retry", a
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Transaction history", exact: true }).click();
-  await expect(page.getByText("Your saved expenses will appear here.")).toBeVisible();
+  await expect(page.getByText("Your transactions will appear here.")).toBeVisible();
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await page.getByRole("button", { name: "Add expense", exact: true }).click();
   await page.getByLabel("Expense amount", { exact: true }).fill("10");
@@ -614,7 +840,7 @@ test("an interrupted expense write leaves the ledger available for retry", async
   await expect(page.getByText("Taxi fare", { exact: true })).toHaveCount(1);
 });
 
-test("expense records survive full offline browser closure and allow another write", async ({
+test("income and expense records survive full offline browser closure and allow another write", async ({
   browserName,
   baseURL,
 }, testInfo) => {
@@ -630,6 +856,12 @@ test("expense records survive full offline browser closure and allow another wri
     await page.getByRole("button", { name: "Food", exact: true }).click();
     await page.getByRole("button", { name: "Save expense", exact: true }).click();
     await expect(page.getByText("₱987.65", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Add income", exact: true }).click();
+    await page.getByLabel("Income amount", { exact: true }).fill("20");
+    await page.getByLabel("Income note", { exact: true }).fill("Paycheck");
+    await page.getByRole("button", { name: "Bonus", exact: true }).click();
+    await page.getByRole("button", { name: "Save income", exact: true }).click();
+    await expect(page.getByText("₱1,007.65", { exact: true })).toBeVisible();
     await page.evaluate(async () => {
       await navigator.serviceWorker.ready;
     });
@@ -641,16 +873,17 @@ test("expense records survive full offline browser closure and allow another wri
     });
     page = await context.newPage();
     await page.goto("/");
-    await expect(page.getByText("₱987.65", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱1,007.65", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash", exact: true }).click();
-    await page.getByRole("button", { name: "Add expense", exact: true }).click();
-    await page.getByLabel("Expense amount", { exact: true }).fill("2.35");
-    await page.getByLabel("Expense note", { exact: true }).fill("Water");
-    await page.getByRole("button", { name: "Save expense", exact: true }).click();
-    await expect(page.getByText("₱985.30", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Add income", exact: true }).click();
+    await page.getByLabel("Income amount", { exact: true }).fill("2.35");
+    await page.getByLabel("Income note", { exact: true }).fill("Interest");
+    await page.getByRole("button", { name: "Save income", exact: true }).click();
+    await expect(page.getByText("₱1,010.00", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Transaction history", exact: true }).click();
     await expect(page.getByText("Coffee", { exact: true })).toBeVisible();
-    await expect(page.getByText("Water", { exact: true })).toBeVisible();
+    await expect(page.getByText("Paycheck", { exact: true })).toBeVisible();
+    await expect(page.getByText("Interest", { exact: true })).toBeVisible();
   } finally {
     await context.close();
   }

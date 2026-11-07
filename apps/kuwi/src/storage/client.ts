@@ -20,21 +20,24 @@ export type Setup = {
 };
 
 export type ExpenseCategory = { id: string; label: string };
-export type ExpenseRecord = {
+export type IncomeCategory = { id: string; label: string };
+export type TransactionRecord = {
+  kind: "expense" | "income";
   id: string;
-  operation_id: string;
   account_id: string;
-  category_id: string;
-  category_label: string;
+  category_id: string | null;
+  category_label: string | null;
   amount_minor: number;
   date: string;
   note: string | null;
   created_at: string;
+  planned: number;
 };
-export type ExpenseLedger = {
+export type TransactionLedger = {
   account: Account;
-  categories: ExpenseCategory[];
-  expenses: ExpenseRecord[];
+  expense_categories: ExpenseCategory[];
+  income_categories: IncomeCategory[];
+  transactions: TransactionRecord[];
 };
 export type CreateExpenseInput = {
   operationId: string;
@@ -44,14 +47,25 @@ export type CreateExpenseInput = {
   date: string;
   note?: string;
 };
-export type CreateExpenseResult = { ledger: ExpenseLedger; replayed: boolean };
+export type CreateIncomeInput = {
+  operationId: string;
+  accountId: string;
+  categoryId?: string;
+  amountMinor: number;
+  date: string;
+  note?: string;
+};
+export type CreateTransactionResult = {
+  ledger: TransactionLedger;
+  replayed: boolean;
+};
 
 export type DatabaseResult =
   | Setup
   | Account[]
   | Account
-  | ExpenseLedger
-  | CreateExpenseResult
+  | TransactionLedger
+  | CreateTransactionResult
   | null;
 
 let worker: Worker | undefined;
@@ -83,12 +97,12 @@ function stopWorker(error: Error) {
  * Send a worker command and surface its result or failure to the caller.
  * Writes time out after 15 seconds so callers can retry with the same operation ID;
  * reads wait up to 60 seconds for OPFS initialization.
- * @param command - A supported setup, account, ledger, expense, or close command.
+ * @param command - A supported setup, account, ledger, transaction, or close command.
  * @param args - Command-specific values sent to the dedicated database worker.
  * @returns The typed command result; the promise rejects on worker errors or timeout.
  */
 export function database<T extends DatabaseResult = DatabaseResult>(
-  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "close",
+  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "createIncome" | "close",
   args: object = {},
 ): Promise<T> {
   if (!worker) {
@@ -105,7 +119,7 @@ export function database<T extends DatabaseResult = DatabaseResult>(
   }
   return new Promise((resolve, reject) => {
     const id = ++sequence;
-    const isWrite = command === "complete" || command === "createExpense" || command.startsWith("account.");
+    const isWrite = command === "complete" || command === "createExpense" || command === "createIncome" || command.startsWith("account.");
     const timer = setTimeout(
       () =>
         stopWorker(
@@ -113,7 +127,9 @@ export function database<T extends DatabaseResult = DatabaseResult>(
             isWrite
               ? command === "createExpense"
                 ? "Save confirmation timed out. Retry to check whether your expense was saved."
-                : "Save confirmation timed out. Retry the account change to check whether it was saved."
+                : command === "createIncome"
+                  ? "Save confirmation timed out. Retry to check whether your income was saved."
+                  : "Save confirmation timed out. Retry the account change to check whether it was saved."
               : "Opening local storage timed out. Retry to reopen existing storage.",
           ),
         ),

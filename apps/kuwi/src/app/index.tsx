@@ -14,10 +14,10 @@ import {
   closeDatabase,
   database,
   type Account,
-  type ExpenseLedger,
+  type TransactionLedger,
   type Setup,
 } from "../storage/client";
-import { ExpenseWorkspace } from "../expenses/ExpenseWorkspace";
+import { TransactionWorkspace } from "../transactions/TransactionWorkspace";
 const currencies = [
   ["PHP", "Philippine Peso"],
   ["USD", "US Dollar"],
@@ -72,7 +72,7 @@ function formatMoney(amount: number, currency: string) {
 
 type AccountForm = { mode: "create" } | { mode: "edit"; account: Account };
 
-/** Render local setup and manage saved accounts; storage failures always stay visible. */
+/** Render local setup, saved accounts, and transaction workspaces with visible storage errors. */
 export default function Home() {
   const [saved, setSaved] = useState<Setup | null>(null),
     [phase, setPhase] = useState("loading");
@@ -95,8 +95,8 @@ export default function Home() {
   const [creditOwedEnabled, setCreditOwedEnabled] = useState(false);
   const [operation, setOperation] = useState<{ key: string; id: string } | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
-  const [expenseLedger, setExpenseLedger] = useState<ExpenseLedger | null>(null);
-  const [expenseMode, setExpenseMode] = useState<"expense" | "history" | null>(null);
+  const [transactionLedger, setTransactionLedger] = useState<TransactionLedger | null>(null);
+  const [transactionMode, setTransactionMode] = useState<"expense" | "income" | "history" | null>(null);
   /**
    * Reopen the worker and read canonical setup, updating saved data and phase.
    * Resolves after startup succeeds or its failure is displayed; callers reset
@@ -217,19 +217,20 @@ export default function Home() {
     }
   }
   /**
-   * Load the selected account's local ledger before opening expense entry or history.
+   * Load the selected account's local ledger before opening an entry or history.
    * @param mode - Workspace view to display after the ledger loads.
+   * @returns Resolves after opening the workspace or displaying a storage error.
    * On storage failure, keeps the current screen open and shows the error.
    */
-  async function openExpenseWorkspace(mode: "expense" | "history") {
+  async function openTransactionWorkspace(mode: "expense" | "income" | "history") {
     if (!selectedAccount) return;
     setError("");
     try {
-      const ledger = await database<ExpenseLedger>("ledger", {
+      const ledger = await database<TransactionLedger>("ledger", {
         accountId: selectedAccount.id,
       });
-      setExpenseLedger(ledger);
-      setExpenseMode(mode);
+      setTransactionLedger(ledger);
+      setTransactionMode(mode);
     } catch (failure) {
       setError((failure as Error).message);
     }
@@ -376,13 +377,13 @@ export default function Home() {
         ) : saved ? (
           <View style={s.content}>
             <Text style={s.title}>Welcome, {saved.preferred_name}.</Text>
-            {expenseMode && expenseLedger ? (
-              <ExpenseWorkspace
-                mode={expenseMode}
-                ledger={expenseLedger}
-                onBack={() => setExpenseMode(null)}
+            {transactionMode && transactionLedger ? (
+              <TransactionWorkspace
+                mode={transactionMode}
+                ledger={transactionLedger}
+                onBack={() => setTransactionMode(null)}
                 onLedgerChange={(next) => {
-                  setExpenseLedger(next);
+                  setTransactionLedger(next);
                   setSelectedAccount(next.account);
                   setSaved((current) => current ? {
                     ...current,
@@ -524,8 +525,11 @@ export default function Home() {
                     Credit limit {formatMoney(selectedAccount.credit_limit_minor, selectedAccount.currency_code)}
                   </Text>
                 ) : null}
-                {button("Add expense", () => void openExpenseWorkspace("expense"))}
-                {button("Transaction history", () => void openExpenseWorkspace("history"))}
+                {button("Add expense", () => void openTransactionWorkspace("expense"))}
+                {selectedAccount.type !== "assets"
+                  ? button("Add income", () => void openTransactionWorkspace("income"))
+                  : null}
+                {button("Transaction history", () => void openTransactionWorkspace("history"))}
                 {button("Edit account details", () => editAccount(selectedAccount))}
                 {button("Back to accounts", () => setSelectedAccount(null))}
               </View>

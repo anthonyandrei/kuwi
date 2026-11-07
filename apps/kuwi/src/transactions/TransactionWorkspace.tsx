@@ -7,14 +7,26 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { saveExpense } from "./commands";
-import { getLocalDate, parseExpenseAmount, validateExpenseDate } from "./entry";
-import type { ExpenseLedger } from "../storage/client";
+import { saveExpense, saveIncome } from "./commands";
+import {
+  getLocalDate,
+  parseExpenseAmount,
+  parseIncomeAmount,
+  validateExpenseDate,
+  validateIncomeDate,
+} from "./entry";
+import type { TransactionLedger } from "../storage/client";
 
 const ink = "#293c32";
 const sage = "#486b51";
 
-/** Format minor units using the selected account's currency and decimal precision. */
+/**
+ * Format an integer minor-unit amount using its account currency precision.
+ * @param minor - Amount stored in minor units.
+ * @param currency - ISO currency code for display.
+ * @param digits - Decimal places used by the account currency.
+ * @returns The localized currency string.
+ */
 function formatMoney(minor: number, currency: string, digits: number): string {
   return new Intl.NumberFormat("en-PH", {
     style: "currency",
@@ -25,58 +37,99 @@ function formatMoney(minor: number, currency: string, digits: number): string {
 }
 
 /**
- * Render an expense form or saved history for one account.
- * @param mode - Whether to show the entry form or history list.
- * @param ledger - The selected account, category inventory, and saved expenses.
+ * Render an expense or income form, or the combined history for one account.
+ * @param mode - Entry type or history view to show.
+ * @param ledger - Selected account, canonical category lists, and saved transactions.
  * @param onBack - Return to the selected account screen.
  * @param onLedgerChange - Publish the refreshed ledger after a successful save.
+ * @returns The form or combined transaction history for the selected account.
  */
-export function ExpenseWorkspace({
+export function TransactionWorkspace({
   mode,
   ledger,
   onBack,
   onLedgerChange,
 }: {
-  mode: "expense" | "history";
-  ledger: ExpenseLedger;
+  mode: "expense" | "income" | "history";
+  ledger: TransactionLedger;
   onBack: () => void;
-  onLedgerChange: (next: ExpenseLedger) => void;
+  onLedgerChange: (next: TransactionLedger) => void;
 }) {
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [date, setDate] = useState(getLocalDate());
-  const [categoryId, setCategoryId] = useState("other");
+  const [categoryId, setCategoryId] = useState(mode === "expense" ? "other" : "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const operationId = useRef("");
+  const incomeAttempt = useRef<{ operationId: string } | null>(null);
+  const expenseOperationId = useRef("");
   const { account } = ledger;
   const currency = account.currency_code;
+  const today = getLocalDate();
 
-  /** Keep the operation ID across failures so a retry can recover a committed save. */
-  async function submitExpense() {
-    const dateError = validateExpenseDate(date, getLocalDate());
-    const amountMinor = parseExpenseAmount(amount, account.decimal_places);
-    if (dateError) return setError(dateError);
-    if (amountMinor === null)
-      return setError("Enter an expense amount greater than zero.");
+  /**
+   * Validate and save the selected entry with a stable operation ID for retries.
+   * A failed save keeps the form values and displays the error for another attempt.
+   */
+  async function submitTransaction() {
+    const isIncome = mode === "income";
+    const dateError = isIncome
+      ? validateIncomeDate(date)
+      : validateExpenseDate(date, today);
+    if (dateError) {
+      setError(dateError);
+      return;
+    }
+
+    const isFutureIncome = isIncome && date > today;
+    const amountMinor = isIncome
+      ? parseIncomeAmount(amount, account.decimal_places, isFutureIncome)
+      : parseExpenseAmount(amount, account.decimal_places);
+    if (amountMinor === null) {
+      setError(
+        isIncome
+          ? "Enter a valid income amount. Current and past entries must be greater than zero."
+          : "Enter an expense amount greater than zero.",
+      );
+      return;
+    }
+
     setError("");
     setSaving(true);
-    if (!operationId.current) operationId.current = crypto.randomUUID();
     try {
-      const result = await saveExpense({
-        operationId: operationId.current,
-        accountId: account.id,
-        categoryId,
-        amountMinor,
-        date,
-        note,
-      });
-      onLedgerChange(result.ledger);
-      operationId.current = "";
+      if (isIncome) {
+        const request = {
+          accountId: account.id,
+          categoryId: categoryId || undefined,
+          amountMinor,
+          date,
+          note: note.trim() || undefined,
+        };
+        if (!incomeAttempt.current)
+          incomeAttempt.current = { operationId: crypto.randomUUID() };
+        const result = await saveIncome({
+          operationId: incomeAttempt.current.operationId,
+          ...request,
+        });
+        onLedgerChange(result.ledger);
+        incomeAttempt.current = null;
+      } else {
+        if (!expenseOperationId.current) expenseOperationId.current = crypto.randomUUID();
+        const result = await saveExpense({
+          operationId: expenseOperationId.current,
+          accountId: account.id,
+          categoryId,
+          amountMinor,
+          date,
+          note: note.trim(),
+        });
+        onLedgerChange(result.ledger);
+        expenseOperationId.current = "";
+      }
       setAmount("");
       setNote("");
       setDate(getLocalDate());
-      setCategoryId("other");
+      setCategoryId(isIncome ? "" : "other");
       onBack();
     } catch (failure) {
       setError((failure as Error).message);
@@ -98,41 +151,61 @@ export function ExpenseWorkspace({
             {formatMoney(account.balance_minor, currency, account.decimal_places)}
           </Text>
         </View>
-        {ledger.expenses.length === 0 ? (
-          <Text style={styles.copy}>Your saved expenses will appear here.</Text>
+        {ledger.transactions.length === 0 ? (
+          <Text style={styles.copy}>Your transactions will appear here.</Text>
         ) : (
           <ScrollView style={styles.history}>
-            {ledger.expenses.map((expense) => (
-              <View key={expense.id} style={styles.entry}>
-                <View style={styles.entryCopy}>
-                  <Text style={styles.entryTitle}>
-                    {expense.note || expense.category_label}
-                  </Text>
-                  <Text style={styles.meta}>
-                    {expense.category_label} · {expense.date} · {account.name}
+            {ledger.transactions.map((transaction) => {
+              const categoryLabel = transaction.category_label ?? "Income";
+              const amountLabel = formatMoney(
+                transaction.amount_minor,
+                currency,
+                account.decimal_places,
+              );
+              return (
+                <View key={`${transaction.kind}:${transaction.id}`} style={styles.entry}>
+                  <View style={styles.entryCopy}>
+                    <Text style={styles.entryTitle}>
+                      {transaction.note || categoryLabel}
+                    </Text>
+                    <Text style={styles.meta}>
+                      {categoryLabel} · {transaction.date} · {account.name}
+                      {transaction.planned ? " · Planned" : ""}
+                    </Text>
+                  </View>
+                  <Text
+                    style={
+                      transaction.kind === "income"
+                        ? styles.incomeAmount
+                        : styles.entryAmount
+                    }
+                  >
+                    {transaction.kind === "income" ? "+" : ""}{amountLabel}
                   </Text>
                 </View>
-                <Text style={styles.entryAmount}>
-                  {formatMoney(
-                    expense.amount_minor,
-                    currency,
-                    account.decimal_places,
-                  )}
-                </Text>
-              </View>
-            ))}
+              );
+            })}
           </ScrollView>
         )}
       </View>
     );
+
+  const isIncome = mode === "income";
+  const categories = isIncome
+    ? [{ id: "", label: "No category" }, ...ledger.income_categories]
+    : ledger.expense_categories;
 
   return (
     <View style={styles.content}>
       <Pressable accessibilityRole="button" onPress={onBack} style={styles.back}>
         <Text style={styles.backText}>Back to account</Text>
       </Pressable>
-      <Text style={styles.title}>Add an expense</Text>
-      <Text style={styles.copy}>Record money spent from {account.name}.</Text>
+      <Text style={styles.title}>{isIncome ? "Add income" : "Add an expense"}</Text>
+      <Text style={styles.copy}>
+        {isIncome
+          ? `Record income for ${account.name}.`
+          : `Record money spent from ${account.name}.`}
+      </Text>
       <View style={styles.balanceSummary}>
         <Text style={styles.label}>Current balance</Text>
         <Text style={styles.balance}>
@@ -146,18 +219,18 @@ export function ExpenseWorkspace({
       ) : null}
       <Text style={styles.label}>Amount ({currency})</Text>
       <TextInput
-        accessibilityLabel="Expense amount"
+        accessibilityLabel={isIncome ? "Income amount" : "Expense amount"}
         value={amount}
         onChangeText={setAmount}
         keyboardType="decimal-pad"
         placeholder="0"
         style={styles.input}
       />
-      <Text style={styles.label}>Category</Text>
+      <Text style={styles.label}>{isIncome ? "Category (optional)" : "Category"}</Text>
       <View style={styles.categories}>
-        {ledger.categories.map((category) => (
+        {categories.map((category) => (
           <Pressable
-            key={category.id}
+            key={category.id || "no-category"}
             accessibilityRole="button"
             accessibilityState={{ selected: categoryId === category.id }}
             onPress={() => setCategoryId(category.id)}
@@ -179,10 +252,10 @@ export function ExpenseWorkspace({
       </View>
       <Text style={styles.label}>Date</Text>
       {createElement("input", {
-        "aria-label": "Expense date",
+        "aria-label": isIncome ? "Income date" : "Expense date",
         type: "date",
         value: date,
-        max: getLocalDate(),
+        ...(isIncome ? {} : { max: today }),
         onChange: (event: { currentTarget: { value: string } }) =>
           setDate(event.currentTarget.value),
         style: {
@@ -198,7 +271,7 @@ export function ExpenseWorkspace({
       })}
       <Text style={styles.label}>Note</Text>
       <TextInput
-        accessibilityLabel="Expense note"
+        accessibilityLabel={isIncome ? "Income note" : "Expense note"}
         value={note}
         onChangeText={setNote}
         placeholder="What was it for?"
@@ -207,13 +280,17 @@ export function ExpenseWorkspace({
       <Pressable
         accessibilityRole="button"
         disabled={saving}
-        onPress={() => void submitExpense()}
+        onPress={() => void submitTransaction()}
         style={[styles.saveButton, saving && styles.disabled]}
       >
-        <Text style={styles.saveText}>{saving ? "Saving…" : "Save expense"}</Text>
+        <Text style={styles.saveText}>
+          {saving ? "Saving…" : isIncome ? "Save income" : "Save expense"}
+        </Text>
       </Pressable>
       <Text style={styles.hint}>
-        Choose today or an earlier date.
+        {isIncome
+          ? "Future-dated income is planned and does not change the balance."
+          : "Choose today or an earlier date."}
       </Text>
     </View>
   );
@@ -288,4 +365,5 @@ const styles = StyleSheet.create({
   entryTitle: { color: ink, fontSize: 16, fontWeight: "700" },
   meta: { color: "#526355", fontSize: 12, lineHeight: 18 },
   entryAmount: { color: ink, fontSize: 16, fontWeight: "700" },
+  incomeAmount: { color: sage, fontSize: 16, fontWeight: "700" },
 });
