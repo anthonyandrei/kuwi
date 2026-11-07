@@ -82,8 +82,9 @@ No Cloudflare product deployment or storage migration was needed.
 
 ## Remaining acceptance work
 
-Installation, phone layout/motion and keyboard comparison, full app closure,
-and offline reopening on the physical iPhone remain required before closing
+Home Screen installation and setup have passed on the physical iPhone.
+Populated Safari ownership handoff and complete layout/motion and
+software-keyboard comparison remain required before closing
 #2. Desktop WebKit passes cannot replace those checks. This app does not
 implement backup/restore or later finance journeys, which belong to subsequent
 work under the parent issue.
@@ -110,5 +111,21 @@ build byte for byte. The service worker returns `Cache-Control: no-cache` and
 SQLite WASM returns `application/wasm`. An ephemeral WebKit context could not
 open storage; the disk-backed check uses the established test approach.
 
-iPhone Mirroring timed out on both connection attempts. Physical installation
-and offline closure verification are pending reconnection.
+Earlier iPhone Mirroring attempts timed out. After reconnection, the app was
+installed from Safari using Add to Home Screen with Open as Web App enabled.
+The standalone app opened, accepted the preferred name Anthony, allowed
+skipping the introduction, and showed PHP/Cash/zero defaults. Its custom
+number pad displayed 1234.56 after entering 1234.567. The amount was returned
+to zero before saving, and the app showed Anthony's Cash account at PHP 0.00.
+No sign-in was used. Fast text injection through Mirroring scrambled input;
+individual key presses entered the intended name. This does not verify the
+phone's software keyboard. Anthony then confirmed a successful full closure and Home Screen reopening
+in Airplane Mode with Wi-Fi off: the account remained at PHP 0.00 and setup
+did not repeat. After connectivity was restored, Mirroring visibly showed the
+retained account.
+
+In Safari, duplicating the Kuwi tab showed Database busy. Closing the owner
+tab and selecting Retry opening in the second tab succeeded. This handoff
+used a fresh Safari store, so populated Safari data retention across handoff
+is still unverified on the phone. Safari remained at fresh setup while the
+installed app retained its account, consistent with separate local stores.

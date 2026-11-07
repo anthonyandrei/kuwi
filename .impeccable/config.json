@@ -1,0 +1,27 @@
+{
+  "buildPath": "code",
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "all-caps-body",
+        "value": "*",
+        "files": [
+          "prototypes/storage-pwa/index.html"
+        ],
+        "createdAt": "2026-11-06T17:40:47.115Z",
+        "reason": "Agent reviewed: uppercase is limited to the short disposable-prototype status label, not a body passage."
+      },
+      {
+        "rule": "cream-palette",
+        "value": "*",
+        "files": [
+          "prototypes/storage-pwa/index.html"
+        ],
+        "createdAt": "2026-11-06T17:40:47.268Z",
+        "reason": "User confirmed: accepted Kuwi scope specifies the supplied warm cream and sage brand palette; see docs/product-scope.md."
+      }
+    ]
+  }
+}

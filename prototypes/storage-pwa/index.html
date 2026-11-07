@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#52735d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <title>Kuwi storage test</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #26352c; background: #faf6ee; }
+    * { box-sizing: border-box; }
+    body { margin: 0 auto; padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom)); max-width: 800px; }
+    h1 { font-size: 1.65rem; margin-bottom: 8px; } h2 { font-size: 1.1rem; }
+    p { line-height: 1.5; } .tag { font-size: .8rem; letter-spacing: .05em; text-transform: uppercase; }
+    #balance { font-size: 2rem; margin: 8px 0; font-variant-numeric: tabular-nums; }
+    #status { overflow-wrap: anywhere; } .statuses { padding: 16px; background: #e7eddf; border-radius: 12px; }
+    .statuses p { margin: 6px 0; } .buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+    button, .file { font: inherit; border-radius: 8px; padding: 12px 14px; border: 1px solid #8f9e8c; color: inherit; background: #fffdf8; min-height: 46px; cursor: pointer; }
+    button:first-child { background: #52735d; color: white; border-color: #52735d; }
+    button:focus-visible, .file:focus-within { outline: 3px solid #b36a37; outline-offset: 3px; }
+    .file { display: inline-block; margin: 10px 0; } input[type=file] { max-width: 100%; margin-top: 8px; display: block; }
+    pre { padding: 14px; border: 1px solid #d9ddcf; border-radius: 8px; overflow: auto; background: #fffdf8; font-size: .8rem; line-height: 1.5; }
+    #log { min-height: 72px; max-height: 200px; white-space: pre-wrap; } summary { cursor: pointer; padding: 10px 0; }
+  </style>
+</head>
+<body>
+  <p class="tag">Disposable prototype · scratch data only</p>
+  <h1>Kuwi storage test</h1>
+  <p>This checks local saving before we build the finance app. Use test entries only. The account starts with ₱1,000.00.</p>
+  <div class="statuses" aria-live="polite">
+    <p id="status" data-phase="opening">Opening database…</p>
+    <p id="balance">₱—</p>
+    <p id="offline">Preparing offline files…</p>
+    <p id="persistence">Checking storage status…</p>
+  </div>
+  <h2>Save and recovery checks</h2>
+  <div class="buttons">
+    <button id="add">Add ₱25 expense</button>
+    <button id="fail">Fail a write</button>
+    <button id="interrupt">Interrupt a write</button>
+    <button id="migration">Fail a migration</button>
+  </div>
+  <p>Failed and interrupted writes should leave the balance and saved entries unchanged.</p>
+  <div class="buttons">
+    <button id="close">Close database</button>
+    <button id="reopen">Reopen database</button>
+    <button id="persist">Request persistent storage</button>
+    <button id="export">Export backup</button>
+    <button id="reset">Reset scratch entries</button>
+  </div>
+  <label class="file">Restore a prototype backup (replaces scratch entries)
+    <!-- iOS can disable SQLite backups when filtering by extension or MIME type.
+         Leave the picker unfiltered; the worker validates the selected bytes. -->
+    <input id="restore" type="file" aria-describedby="restore-help">
+  </label>
+  <p id="restore-help">All files are shown. Choose your kuwi-PROTOTYPE-backup.sqlite3 file. Only a valid prototype backup can be restored.</p>
+  <details>
+    <summary>iPhone checks</summary>
+    <ol>
+      <li>Open this test over HTTPS in Safari. Wait for “Offline ready”.</li>
+      <li>Add one expense. The balance should be ₱975.00.</li>
+      <li>Use Share, then Add to Home Screen. Open the installed test.</li>
+      <li>Check its balance. Record whether Safari and the Home Screen app share the same test data.</li>
+      <li>In the installed test, add an expense. Turn on Airplane Mode, close the app, and reopen it. Check the balance and add another expense.</li>
+      <li>Try each failure button. Confirm that no partial expense remains.</li>
+      <li>Export a backup to Files, reset scratch entries, then restore the file.</li>
+      <li>Open a second copy. It should report “Database busy” if both copies share the same storage partition.</li>
+    </ol>
+    <p>Desktop automation does not verify Home Screen storage, iOS app termination, or storage eviction.</p>
+  </details>
+  <h2>Results</h2>
+  <pre id="log" role="log"></pre>
+  <details open>
+    <summary>Current database state</summary>
+    <pre id="state">Waiting for storage…</pre>
+  </details>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
