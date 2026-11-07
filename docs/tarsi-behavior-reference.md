@@ -143,6 +143,45 @@ Kuwi's accepted 3NF and ACID requirements therefore need a separate data and
 persistence design. Copying the profile-snapshot format would not establish
 those guarantees. Cross-device conflict behavior remains unresolved.
 
+## Account creation and editing
+
+Source: static inspection of account action module 1731, store module 1685,
+currency helper modules 1701 and 1709, and Wallet/account-drawer chunks. The
+focused files and their source and extracted hashes are retained in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-focused-modules-20261107/`;
+the selected account-drawer chunk is recorded in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-web-lazy-20261107/provenance.json`.
+The additional drawer extraction used for this pass is
+`/tmp/kuwi-account-drawer.js`; its checked rule summary is
+`/tmp/kuwi-account-rule-verification.md`. These are code traces, not runtime or
+iPhone observations.
+
+The account action branches on Debit, Credit, Loans, Assets, Stocks, and Crypto.
+Stocks and Crypto require investment access to be unlocked. Ordinary
+non-credit, non-investment creation clamps a negative amount to zero. A positive
+starting balance creates an initial balance adjustment; zero creates none.
+Credit stores a separate limit and current owed balance. A positive owed amount
+also creates an initial adjustment. Investment balances use units multiplied
+by price, and loan updates rebuild their payment schedule.
+
+The account drawer defaults a new account to Debit, the preferred currency, an
+empty name, and zero amount. It trims and rejects a blank name. It has no
+duplicate-name comparison in the traced submit handler. Its currency control
+opens a separate currency settings route; that route's option list was not
+verified. Existing accounts with linked activity have currency locked. For
+ordinary debit edits with linked activity, the submit handler retains the
+existing balance and the store also protects the currency. Credit limit edits
+remain possible with linked activity. Investment purchase history blocks
+specific changes to investment identity and units. Loan-specific edit outcomes,
+the complete tracked-balance field set, and the exact linked-activity helper
+remain unresolved.
+
+Currency amount formatting uses zero decimal places for JPY, KRW, and CLP,
+three for KWD, BHD, and OMR, and two for other listed currencies. The account
+currency route's supported list and native behavior still need verification.
+See [the account data model](account-data-model.md) for the bounded Kuwi
+behavior implemented from these findings.
+
 ## Next evidence needed
 
 - Extend the observed iPhone first-run path with validation and currency edge cases.
