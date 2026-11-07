@@ -32,6 +32,7 @@ export type TransactionRecord = {
   note: string | null;
   created_at: string;
   planned: number;
+  transfer_id: string | null;
 };
 export type TransactionLedger = {
   account: Account;
@@ -39,6 +40,22 @@ export type TransactionLedger = {
   expense_categories: ExpenseCategory[];
   income_categories: IncomeCategory[];
   transactions: TransactionRecord[];
+  transfers: TransferRecord[];
+};
+export type TransferRecord = {
+  id: string;
+  operation_id: string;
+  from_account_id: string;
+  from_account_name: string;
+  to_account_id: string;
+  to_account_name: string;
+  amount_minor: number;
+  date: string;
+  note: string | null;
+  created_at: string;
+  fee_expense_id: string | null;
+  fee_amount_minor: number;
+  direction: "incoming" | "outgoing";
 };
 export type CreateExpenseInput = {
   operationId: string;
@@ -53,6 +70,15 @@ export type CreateIncomeInput = {
   accountId: string;
   categoryId?: string;
   amountMinor: number;
+  date: string;
+  note?: string;
+};
+export type CreateTransferInput = {
+  operationId: string;
+  fromAccountId: string;
+  toAccountId: string;
+  amountMinor: number;
+  feeMinor: number;
   date: string;
   note?: string;
 };
@@ -78,6 +104,11 @@ export type CreateTransactionResult = {
   replayed: boolean;
 };
 export type CreateExpenseResult = { ledger: TransactionLedger; replayed: boolean };
+export type CreateTransferResult = {
+  accounts: Account[];
+  ledger: TransactionLedger;
+  replayed: boolean;
+};
 export type BackupCurrency = { code: string; decimal_places: number };
 export type BackupProfile = {
   id: string;
@@ -121,8 +152,20 @@ export type BackupExpense = {
   date: string;
   note: string | null;
   created_at: string;
+  transfer_id: string | null;
+};
+export type BackupTransfer = {
+  id: string;
+  from_account_id: string;
+  to_account_id: string;
+  amount_minor: number;
+  fee_amount_minor: number;
+  date: string;
+  note: string | null;
+  created_at: string;
 };
 export type BackupPendingSyncOperation = { operation_id: string };
+export type BackupPendingTransferOperation = { operation_id: string; request_fingerprint: string };
 export type BackupIncomeCategory = { id: string; label: string; sort_order: number };
 export type BackupIncome = {
   id: string;
@@ -152,7 +195,9 @@ export type ProductBackupData = {
   pendingOperations: BackupPendingAccountOperation[];
   categories: BackupCategory[];
   expenses: BackupExpense[];
+  transfers: BackupTransfer[];
   pendingSyncOperations: BackupPendingSyncOperation[];
+  pendingTransferOperations: BackupPendingTransferOperation[];
   incomeCategories: BackupIncomeCategory[];
   incomes: BackupIncome[];
   pendingIncomeSyncOperations: BackupPendingIncomeSyncOperation[];
@@ -161,7 +206,7 @@ export type ProductBackupData = {
 export type ProductBackup = {
   format: "kuwi.backup";
   version: 1;
-  schemaVersion: 5;
+  schemaVersion: 6;
   exportedAt: string;
   integrity: { algorithm: "SHA-256"; digest: string };
   data: ProductBackupData;
@@ -174,6 +219,7 @@ export type DatabaseResult =
   | TransactionLedger
   | CreateTransactionResult
   | CreateExpenseResult
+  | CreateTransferResult
   | ProductBackup
   | null;
 
@@ -206,12 +252,12 @@ function stopWorker(error: Error) {
  * Send a worker command and surface its result or failure to the caller.
  * Writes time out after 15 seconds so the caller can retry with its stable operation ID;
  * reads wait up to 60 seconds for OPFS initialization.
- * @param command - A supported setup, account, ledger, transaction, backup, or close command.
+ * @param command - A supported setup, account, ledger, transaction, transfer, backup, or close command.
  * @param args - Command-specific values sent to the dedicated database worker.
  * @returns The typed command result; the promise rejects on worker errors or timeout.
  */
 export function database<T extends DatabaseResult = DatabaseResult>(
-  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "createIncome" | "updateTransaction" | "deleteTransaction" | "exportBackup" | "restoreBackup" | "close",
+  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "createIncome" | "createTransfer" | "updateTransaction" | "deleteTransaction" | "exportBackup" | "restoreBackup" | "close",
   args: object = {},
 ): Promise<T> {
   if (!worker) {
@@ -228,7 +274,7 @@ export function database<T extends DatabaseResult = DatabaseResult>(
   }
   return new Promise((resolve, reject) => {
     const id = ++sequence;
-    const isWrite = command === "complete" || command === "createExpense" || command === "createIncome" || command === "updateTransaction" || command === "deleteTransaction" || command === "restoreBackup" || command.startsWith("account.");
+    const isWrite = command === "complete" || command === "createExpense" || command === "createIncome" || command === "createTransfer" || command === "updateTransaction" || command === "deleteTransaction" || command === "restoreBackup" || command.startsWith("account.");
     const timer = setTimeout(
       () =>
         stopWorker(
@@ -238,7 +284,9 @@ export function database<T extends DatabaseResult = DatabaseResult>(
                 ? "Save confirmation timed out. Retry to check whether your expense was saved."
                 : command === "createIncome"
                   ? "Save confirmation timed out. Retry to check whether your income was saved."
-                  : command === "restoreBackup"
+                  : command === "createTransfer"
+                    ? "Save confirmation timed out. Retry to check whether your transfer was saved."
+                    : command === "restoreBackup"
                     ? "Restore confirmation timed out. Reopen your saved data before retrying the backup."
                     : command === "updateTransaction" || command === "deleteTransaction"
                       ? "Save confirmation timed out. Reopen transaction history before retrying this change."

@@ -14,6 +14,14 @@ const populatedV4 = readFileSync(
   new URL("./fixtures/populated-v4.sql", import.meta.url),
   "utf8",
 );
+const populatedV4Transfer = readFileSync(
+  new URL("./fixtures/populated-v4-transfer.sql", import.meta.url),
+  "utf8",
+);
+const populatedV5 = readFileSync(
+  new URL("./fixtures/populated-v5.sql", import.meta.url),
+  "utf8",
+);
 const legacyV1Shell = readFileSync(
   new URL("./fixtures/legacy-v1.html", import.meta.url),
 );
@@ -42,14 +50,24 @@ const test = base.extend({
         return legacyV1Worker;
       if (path !== "/db-worker.js" || !storageFault.current) return bytes;
       const source = bytes.toString();
-      if (storageFault.current === "upgradeV4") {
+      if (["upgradeV4", "upgradeV4Transfer", "upgradeV5", "upgradeV5MigrationFailure"].includes(storageFault.current)) {
+        const upgrade = storageFault.current;
+        const populated = upgrade === "upgradeV4"
+          ? populatedV4
+          : upgrade === "upgradeV4Transfer" ? populatedV4Transfer : populatedV5;
         storageFault.current = null;
-        return source.replace(
+        let transformed = source.replace(
           'const version = db.selectValue("PRAGMA user_version");',
           `const originalVersion=db.selectValue("PRAGMA user_version");
-          if(originalVersion===0){db.exec(${JSON.stringify(populatedV4)});}
+          if(originalVersion===0){db.exec(${JSON.stringify(populated)});}
           const version = db.selectValue("PRAGMA user_version");`,
         );
+        if (upgrade === "upgradeV5MigrationFailure")
+          transformed = transformed.replace(
+            '    db.exec("CREATE INDEX IF NOT EXISTS transfers_by_from_date ON transfers(from_account_id,date DESC,created_at DESC)");',
+            '    db.exec("CREATE INDEX IF NOT EXISTS transfers_by_from_date ON transfers(from_account_id,date DESC,created_at DESC)");\n    if (!self.__transferMigrationFailed) { self.__transferMigrationFailed = true; throw Error("Simulated transfer migration failure"); }',
+          );
+        return transformed;
       }
       if (storageFault.current === "transactionUpdateRollback") {
         storageFault.current = null;
@@ -85,6 +103,13 @@ const test = base.extend({
         return source.replace(
           /db\.exec\(\{\s*sql: "UPDATE accounts SET name=/,
           'if(!self.__accountUpdateFailed){self.__accountUpdateFailed=true;throw Error("Simulated account update failure");} db.exec({sql: "UPDATE accounts SET name=',
+        );
+      }
+      if (storageFault.current === "schemaV4Migration") {
+        storageFault.current = null;
+        return source.replace(
+          '      PRAGMA user_version=4;\n    `);\n  });\n}',
+          '      PRAGMA user_version=4;\n    `);\n    throw Error("Simulated version 4 migration failure");\n  });\n}',
         );
       }
       if (storageFault.current === "migrateV1" || storageFault.current === "failV1Migration") {
@@ -298,7 +323,10 @@ test("a legacy expense and backup survive the shell update", async ({
     await expect(page.getByRole("status")).toHaveText("Database closed");
 
     storageFault.legacyBuild = false;
+    storageFault.current = "schemaV4Migration";
     await page.goto("/");
+    await expect(page.getByRole("alert")).toContainText("Simulated version 4 migration failure");
+    await page.reload();
     await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
     await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash" }).click();
@@ -306,6 +334,45 @@ test("a legacy expense and backup survive the shell update", async ({
     await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Back to account" }).click();
     await page.getByRole("button", { name: "Back to accounts" }).click();
+
+    await page.getByRole("button", { name: "Add account" }).click();
+    await page.getByLabel("Account name").fill("Reserve");
+    await page.getByRole("button", { name: "Save account" }).click();
+    await page.getByRole("button", { name: "View account Cash" }).click();
+    await page.getByRole("button", { name: "Transfer between accounts" }).click();
+    await page.getByLabel("To account").selectOption({ label: "Reserve" });
+    await page.getByLabel("Transfer amount").fill("100");
+    await page.getByLabel("Transfer fee (optional)").fill("4.56");
+    await page.getByLabel("Transfer note").fill("Updated schema transfer");
+    const tomorrow = await page.evaluate(() => {
+      const date = new Date();
+      date.setDate(date.getDate() + 1);
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    });
+    await page.getByLabel("Transfer date").fill(tomorrow);
+    await page.getByRole("button", { name: "Save transfer" }).click();
+    await expect(page.getByText("₱1,120.00", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to accounts" }).click();
+    await page.getByRole("button", { name: "View account Cash" }).click();
+    await page.getByRole("button", { name: "Transaction history" }).click();
+    await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
+    await expect(page.getByText("Updated schema transfer", { exact: true })).toBeVisible();
+    await expect(page.getByText("Bank transfer fee to Reserve", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to account" }).click();
+    await page.getByRole("button", { name: "Back to accounts" }).click();
+
+    const currentDownloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export backup" }).click();
+    const currentDownload = await currentDownloadPromise;
+    const currentBackup = JSON.parse(readFileSync(await currentDownload.path(), "utf8"));
+    expect(currentBackup).toMatchObject({
+      schemaVersion: 6,
+      data: {
+        expenses: expect.arrayContaining([expect.objectContaining({ transfer_id: expect.any(String) })]),
+        transfers: [expect.objectContaining({ fee_amount_minor: 456, note: "Updated schema transfer" })],
+        pendingTransferOperations: [expect.objectContaining({ operation_id: expect.any(String) })],
+      },
+    });
 
     const chooserPromise = page.waitForEvent("filechooser");
     await page.getByRole("button", { name: "Restore backup" }).click();
@@ -533,7 +600,7 @@ test("expense and income edits move effects between accounts and deletions prese
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(5);
+  expect(backup.schemaVersion).toBe(6);
   expect(backup.data.expenses).toHaveLength(1);
   expect(backup.data.expenses[0].note).toBe("Rent");
   expect(backup.data.pendingSyncOperations).toEqual([
@@ -706,11 +773,112 @@ test("a populated v4 database migrates while keeping account and transaction ide
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
-  expect(backup.schemaVersion).toBe(5);
+  expect(backup.schemaVersion).toBe(6);
   expect(backup.data.accounts.map(({ id }) => id)).toEqual(["legacy-cash", "legacy-reserve"]);
   expect(backup.data.expenses.map(({ id }) => id)).toEqual(["legacy-expense"]);
   expect(backup.data.incomes.map(({ id }) => id)).toEqual(["legacy-income"]);
   expect(backup.data.pendingTransactionOperations).toEqual([]);
+});
+
+test("a populated v5 database gains transfer relations without losing transaction receipts", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.current = "upgradeV5";
+  await page.goto("/");
+  await expect(page.getByText("₱1,013.00", { exact: true })).toBeVisible();
+  await expect(page.getByText("₱200.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Cash" }).click();
+  await page.getByRole("button", { name: "Transaction history" }).click();
+  await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to account" }).click();
+  await page.getByRole("button", { name: "Transfer between accounts" }).click();
+  await page.getByLabel("Transfer amount").fill("10");
+  await page.getByLabel("Transfer fee (optional)").fill("0.50");
+  await page.getByLabel("Transfer note").fill("After v5 migration");
+  await page.getByRole("button", { name: "Save transfer" }).click();
+  await expect(page.getByText("₱1,002.50", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Back to accounts" }).click();
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export backup" }).click();
+  const download = await downloadPromise;
+  const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
+  expect(backup).toMatchObject({
+    schemaVersion: 6,
+    data: {
+      expenses: expect.arrayContaining([
+        expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
+        expect.objectContaining({ note: "Bank transfer fee to Reserve", transfer_id: expect.any(String) }),
+      ]),
+      transfers: [expect.objectContaining({ note: "After v5 migration", fee_amount_minor: 50 })],
+      pendingTransactionOperations: [expect.objectContaining({
+        operation_id: "legacy-edit",
+        transaction_id: "legacy-expense",
+        operation_type: "edit",
+      })],
+    },
+  });
+});
+
+test("a failed v6 migration rolls back and retries from a populated v5 database", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  storageFault.current = "upgradeV5MigrationFailure";
+  await page.goto("/");
+  await expect(page.getByRole("alert")).toContainText("Simulated transfer migration failure");
+
+  await page.reload();
+  await expect(page.getByText("₱1,013.00", { exact: true })).toBeVisible();
+  await expect(page.getByText("₱200.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Cash" }).click();
+  await page.getByRole("button", { name: "Transaction history" }).click();
+  await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to account" }).click();
+  await page.getByRole("button", { name: "Transfer between accounts" }).click();
+  await page.getByLabel("Transfer amount").fill("10");
+  await page.getByRole("button", { name: "Save transfer" }).click();
+  await expect(page.getByText("₱1,003.00", { exact: true })).toBeVisible();
+});
+
+test("a populated v4 transfer database keeps its transfer and linked fee through migration", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.current = "upgradeV4Transfer";
+  await page.goto("/");
+  await expect(page.getByText("₱908.44", { exact: true })).toBeVisible();
+  await expect(page.getByText("₱300.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Cash" }).click();
+  await page.getByRole("button", { name: "Transaction history" }).click();
+  await expect(page.getByText("Legacy transfer", { exact: true })).toBeVisible();
+  await expect(page.getByText("Bank transfer fee to Reserve", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit Bank transfer fee to Reserve", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Delete Bank transfer fee to Reserve", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Back to account" }).click();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export backup" }).click();
+  const download = await downloadPromise;
+  const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
+  expect(backup).toMatchObject({
+    schemaVersion: 6,
+    data: {
+      expenses: expect.arrayContaining([
+        expect.objectContaining({ id: "legacy-expense", transfer_id: null }),
+        expect.objectContaining({ id: "legacy-transfer-fee", transfer_id: "legacy-transfer" }),
+      ]),
+      transfers: [expect.objectContaining({ id: "legacy-transfer", fee_amount_minor: 456 })],
+      pendingTransferOperations: [{
+        operation_id: "legacy-transfer",
+        request_fingerprint: "b".repeat(64),
+      }],
+      pendingTransactionOperations: [],
+    },
+  });
 });
 
 test("migrates a populated v1 database into derived account balances", async ({

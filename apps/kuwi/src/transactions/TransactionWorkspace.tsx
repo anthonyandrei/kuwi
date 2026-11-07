@@ -37,9 +37,9 @@ function formatMoney(minor: number, currency: string, digits: number): string {
 }
 
 /**
- * Render an expense or income form, or the combined history with correction and deletion actions.
+ * Render an expense or income form, or history with transfers and transaction edit/delete actions.
  * @param mode - Entry type or history view to show.
- * @param ledger - Selected account, all account balances, canonical categories, and saved transactions.
+ * @param ledger - Selected account, all account balances, canonical categories, transactions, and transfers.
  * @param onBack - Return to the selected account screen.
  * @param onLedgerChange - Publish the refreshed ledger after a successful mutation.
  * @returns The form or combined transaction history for the selected account.
@@ -235,19 +235,41 @@ export function TransactionWorkspace({
             {formatMoney(account.balance_minor, currency, account.decimal_places)}
           </Text>
         </View>
-        {ledger.transactions.length === 0 ? (
+        {ledger.transactions.length === 0 && ledger.transfers.length === 0 ? (
           <Text style={styles.copy}>Your transactions will appear here.</Text>
         ) : (
           <ScrollView style={styles.history}>
-            {ledger.transactions.map((transaction) => {
-              const categoryLabel = transaction.category_label ?? "Income";
-              const amountLabel = formatMoney(
-                transaction.amount_minor,
-                currency,
-                account.decimal_places,
-              );
-              return (
-                <View key={`${transaction.kind}:${transaction.id}`} style={styles.entry}>
+            {[
+              ...ledger.transactions.map((transaction) => ({
+                kind: "transaction" as const,
+                id: transaction.id,
+                date: transaction.date,
+                createdAt: transaction.created_at,
+                transaction,
+              })),
+              ...ledger.transfers.map((transfer) => ({
+                kind: "transfer" as const,
+                id: transfer.id,
+                date: transfer.date,
+                createdAt: transfer.created_at,
+                transfer,
+              })),
+            ]
+              .sort((left, right) =>
+                right.date.localeCompare(left.date) ||
+                right.createdAt.localeCompare(left.createdAt) ||
+                right.id.localeCompare(left.id),
+              )
+              .map((item) => item.kind === "transaction" ? (() => {
+                const transaction = item.transaction;
+                const categoryLabel = transaction.category_label ?? "Income";
+                const amountLabel = formatMoney(
+                  transaction.amount_minor,
+                  currency,
+                  account.decimal_places,
+                );
+                return (
+                  <View key={`${transaction.kind}:${transaction.id}`} style={styles.entry}>
                   <View style={styles.entryMain}>
                     <View style={styles.entryCopy}>
                       <Text style={styles.entryTitle}>
@@ -268,31 +290,56 @@ export function TransactionWorkspace({
                       {transaction.kind === "income" ? "+" : ""}{amountLabel}
                     </Text>
                   </View>
-                  <View style={styles.entryActions}>
-                    {transaction.kind === "income" && transaction.planned ? (
-                      <Text style={styles.meta}>Planned income editing is unavailable.</Text>
-                    ) : (
+                  {transaction.transfer_id ? null : (
+                    <View style={styles.entryActions}>
+                      {transaction.kind === "income" && transaction.planned ? (
+                        <Text style={styles.meta}>Planned income editing is unavailable.</Text>
+                      ) : (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`Edit ${transaction.note || categoryLabel}`}
+                          onPress={() => editTransaction(transaction)}
+                          style={styles.actionButton}
+                        >
+                          <Text style={styles.actionText}>Edit</Text>
+                        </Pressable>
+                      )}
                       <Pressable
                         accessibilityRole="button"
-                        accessibilityLabel={`Edit ${transaction.note || categoryLabel}`}
-                        onPress={() => editTransaction(transaction)}
+                        accessibilityLabel={`Delete ${transaction.note || categoryLabel}`}
+                        onPress={() => { setConfirmingDelete(transaction); setError(""); }}
                         style={styles.actionButton}
                       >
-                        <Text style={styles.actionText}>Edit</Text>
+                        <Text style={styles.deleteText}>Delete</Text>
                       </Pressable>
-                    )}
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`Delete ${transaction.note || categoryLabel}`}
-                      onPress={() => { setConfirmingDelete(transaction); setError(""); }}
-                      style={styles.actionButton}
-                    >
-                      <Text style={styles.deleteText}>Delete</Text>
-                    </Pressable>
-                  </View>
+                    </View>
+                  )}
                 </View>
               );
-            })}
+            })() : (
+              <View key={`transfer:${item.transfer.id}`} style={styles.entry}>
+                <View style={styles.entryMain}>
+                  <View style={styles.entryCopy}>
+                    <Text style={styles.entryTitle}>
+                      {item.transfer.direction === "outgoing"
+                        ? `Transfer to ${item.transfer.to_account_name}`
+                        : `Transfer from ${item.transfer.from_account_name}`}
+                    </Text>
+                    <Text style={styles.meta}>{item.transfer.date} · {account.name}</Text>
+                    {item.transfer.note ? <Text style={styles.meta}>{item.transfer.note}</Text> : null}
+                  </View>
+                  <Text style={styles.entryAmount}>
+                    {formatMoney(
+                      item.transfer.direction === "outgoing"
+                        ? -item.transfer.amount_minor
+                        : item.transfer.amount_minor,
+                      currency,
+                      account.decimal_places,
+                    )}
+                  </Text>
+                </View>
+              </View>
+            ))}
           </ScrollView>
         )}
         {confirmingDelete ? (

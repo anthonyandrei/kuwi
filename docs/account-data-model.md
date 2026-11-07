@@ -32,12 +32,11 @@ characters and limits the fractional part to the currency precision, matching
 the recovered formatter behavior.
 
 Positive starting balances become initial adjustment rows. A zero opening
-balance has no adjustment row. When an account has an adjustment, expense, or
-income, its starting balance and currency cannot be changed in the account
-editor; the name remains editable. Credit limit changes remain editable.
-Expenses reduce Debit and Assets balances and increase the amount owed on Credit accounts. The
-balance and activity flag are derived from the referenced adjustment, expense,
-and posted income records. Income adds to Debit and Assets balances and reduces
+balance has no adjustment row. When an account has an adjustment, expense,
+income, or transfer, its starting balance and currency cannot be changed in the
+account editor; the name remains editable. Credit limit changes remain
+editable. Expenses reduce Debit and Assets balances and increase the amount
+owed on Credit accounts. Income adds to Debit and Assets balances and reduces
 the amount owed on Credit accounts. Kuwi currently accepts income on Debit and
 Credit accounts; the recovered income form does not offer Assets accounts.
 
@@ -52,11 +51,14 @@ Credit accounts; the recovered income form does not offer Assets accounts.
 | `setup` | `id` (fixed at 1) | `profile_id` → `profiles.id`, `first_account_id` → `accounts.id`, `completed_at`. |
 | `pending_operations` | `id` | `account_id` → `accounts.id`, `operation_type`, SHA-256 `request_fingerprint`, `created_at`. |
 | `categories` | `id` | Canonical label and display order for built-in expense categories. |
-| `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, positive minor units, date, optional note, `created_at`. |
+| `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, optional `transfer_id` → `transfers.id`, positive minor units, date, optional note, `created_at`. |
 | `pending_sync_operations` | `operation_id` | `operation_id` → `expenses.id`; marks an expense creation for local sync. |
 | `income_categories` | `id` | Canonical label and display order for built-in income categories. |
 | `incomes` | `id` | `account_id` → `accounts.id`, optional `category_id` → `income_categories.id`, nonnegative minor units, date, optional note, planned flag, `created_at`. |
 | `pending_income_sync_operations` | `operation_id` | `operation_id` → `incomes.id`; marks an income creation for local sync. |
+| `transfers` | `id` | `from_account_id` and `to_account_id` → `accounts.id`, positive principal in minor units, date, optional note, `created_at`. |
+| `expenses.transfer_id` | nullable foreign key | `transfer_id` → `transfers.id`; identifies the linked transfer-fee expense. The fee amount and category are stored on the expense. |
+| `pending_transfer_operations` | `operation_id` | `operation_id` → `transfers.id`, SHA-256 request fingerprint; marks the transfer for local sync and stable retries. |
 | `pending_transaction_operations` | `operation_id` | Transaction kind and ID, edit/delete type, request fingerprint, and creation time. Delete receipts retain IDs after their transaction row is removed. |
 
 The non-key dependencies are `code → decimal_places`, `profile id → preferred
@@ -64,18 +66,26 @@ name, preferred currency`, `account id → name, type, currency, credit limit,
 creation time`, `adjustment id → account id, amount, kind, creation time`,
 `operation id → account id, operation type, request fingerprint, creation
 time`, `category id → label, display order`, `expense id → account, category,
-amount, date, note, creation time`, and `income id → account, optional
-category, amount, date, note, planned state, creation time`. Transaction
+optional transfer reference, amount, date, note, creation time`, and
+`income id → account, optional category, amount, date, note, planned state,
+creation time`. Transaction
 operation IDs determine the kind, transaction ID, edit/delete type, fingerprint,
 and creation time. This relation has no foreign key because delete receipts must
 outlive their transaction rows. `setup.id` identifies one profile and its first
 account.
 
-Balances combine `account_adjustments` with posted expense and income effects;
-the app does not store another mutable balance on `accounts`. Account name and
-currency are stored once and referenced by ID from linked facts. Credit limits
-are account terms, while credit balances come from adjustment and transaction
-facts.
+`transfer id → source account, destination account, principal, date, note, and
+creation time`. A fee is an expense in the `fees` category whose `transfer_id`
+points to the transfer. The transfer does not store a second fee amount.
+Backups include a derived `fee_amount_minor` field from the linked expense.
+
+Balances combine `account_adjustments`, posted expense and income effects, and
+transfer principal effects; the app does not store another mutable balance on
+`accounts`. A debit source loses the transfer principal and any linked fee,
+while a debit destination receives the principal. A credit source owes the
+principal and fee. Account name and currency are stored once and referenced by
+ID from linked facts. Credit limits are account terms, while credit balances
+come from adjustment and transaction facts.
 
 ## Write and retry contract
 
@@ -113,17 +123,15 @@ Version 3 adds categories, expenses, pending sync markers, and an account/date
 index. The expense migration runs in one transaction after the account
 migration and preserves version 2 data if it fails.
 
-Version 4 adds income categories, incomes, pending income sync markers, and an
-account/date index. It runs in one transaction after the expense migration.
-Failure leaves version 3 and its expense history intact. Existing account,
-expense, category, and setup IDs are preserved.
-
-Version 5 adds the transaction edit/delete receipt table in one transaction.
-The migration preserves account and transaction IDs from version 4. The
-populated v4 upgrade fixture checks existing account, expense, income, and sync
-marker identities after migration.
+Version 4 adds income categories, incomes, and pending income sync markers.
+Version 5 adds transaction edit/delete receipts. Version 6 adds transfers,
+linked fee references on expenses, and pending transfer operations. The v6
+migration adds transfer relations to income-only databases and preserves rows
+in earlier v4 databases that already have transfers. It also upgrades v5
+databases with transaction receipts but no transfers. Migrations preserve
+account, expense, income, category, and setup IDs.
 
 The adjustment table currently accepts initial balances only. Manual balance
-adjustments, account deletion, loan schedules, investments, transfers, and
+adjustments, account deletion, loan schedules, investments, budgets, and
 cloud-sync delivery need their own verified rules and schema changes before
 implementation.

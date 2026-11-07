@@ -219,12 +219,55 @@ currency selector and cross-currency conversion flow need their own verified
 rate source and are not included. Recurring income, subcategories, custom or
 hidden categories, and native behavior are also outside this stage.
 
-Transfers reject nonpositive amounts, identical source/destination accounts,
-missing accounts, and failed eligibility checks. The action rounds source and
-received amounts in their respective currencies. A positive fee becomes a
-linked expense in the fees category. The returned state updates both account
-balances, the transfer, and the fee expense together. Exact eligibility,
-available-balance limits, and exchange-rate UI rules need further tracing.
+### Same-currency transfer action
+
+Checked 2026-11-07 from common-bundle module 1731, with available-balance logic
+from module 1709, currency rounding from module 1701, and the state store in
+module 1685. The common bundle SHA-256 is
+`ccac38fefe6008c3988e03c933635bd4fcd1f19ae52b5179f623197bd7cda943`; selected
+module ranges and dependencies are recorded in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-focused-modules-20261107/provenance.json`.
+This is static web code inspection. It does not establish runtime behavior or
+iPhone 2.5.9 parity.
+
+The action rejects a nonpositive principal, identical account IDs, missing
+accounts, and failed eligibility or available-funds checks without changing
+the returned state. A Debit or Credit account may send; only a Debit account
+may receive. Assets accounts are excluded. The source and destination must
+have the same currency for Kuwi issue #8. Tarsi's broader action also accepts
+received amounts in another currency, which belongs to issue #9.
+
+The source must cover principal plus fee. Module 1709 defines available funds
+as the account balance for non-Credit accounts and `credit limit - amount owed`
+for Credit. The transfer action applies currency rounding before checking the
+sum. A positive fee becomes an expense on the source account in the `fees`
+category, with note `Bank transfer fee to <destination name>` and the same
+date and creation timestamp as the transfer. The action moves principal to the
+destination and records the principal, fee, and linked fee expense in one
+returned store update. It applies the movement immediately, including for a
+future date.
+
+Module 1701 uses two decimal places for PHP and zero for JPY. Its examples
+include PHP 12.345 rounding to 12.35 and JPY 12.5 rounding to 13. Kuwi's
+currently supported account currencies use two decimals except JPY. Kuwi's
+transfer form limits typed input to that precision and stores integer minor
+units.
+
+Worked examples from the traced helpers:
+
+| Source balance | Transfer | Fee | Result |
+| --- | ---: | ---: | --- |
+| PHP 1,500.00 Debit | PHP 200.00 | None | Source PHP 1,300.00; destination receives PHP 200.00. |
+| PHP 1,000.00 Debit | PHP 975.00 | PHP 25.00 | Source PHP 0.00; destination receives PHP 975.00; linked fee expense is PHP 25.00. |
+| PHP 1,024.99 Debit | PHP 1,000.00 | PHP 25.00 | Rejected because principal plus fee exceeds available balance by PHP 0.01. |
+| PHP 50.00 owed, PHP 150.00 credit limit | PHP 95.00 from Credit | PHP 5.00 | Available credit is PHP 100.00; result owes PHP 150.00 and the Debit destination receives PHP 95.00. |
+
+The cached index maps `./transfer.tsx` to
+`/_expo/static/js/web/transfer-2dbf20b142412a934fd581303887e2c8.js`, but that
+lazy chunk is absent from the local cache. The public JavaScript reader rejected
+the `application/javascript` response and the browser access host was
+unavailable. The action rules above are verified; exact transfer screen
+interactions and iPhone comparison remain open.
 
 ## Device persistence
 

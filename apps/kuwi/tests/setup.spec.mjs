@@ -67,6 +67,36 @@ const test = base.extend({
           "self.postMessage({ id, result });",
           "if (command !== 'createIncome') self.postMessage({ id, result });",
         );
+      if (storageFault.current === "transfer-write")
+        return source.replace(
+          /db\.exec\(\{\s*sql: "INSERT INTO transfers/,
+          'if(!globalThis.__transferWriteFailed){globalThis.__transferWriteFailed=true;throw Error("Simulated transfer write failure");} db.exec({sql: "INSERT INTO transfers',
+        );
+      if (storageFault.current === "transfer-fee-write")
+        return source.replace(
+          /db\.exec\(\{\s*sql: "INSERT INTO expenses\(id,account_id,category_id,amount_minor,date,note,created_at,transfer_id\)/,
+          'if(!globalThis.__transferFeeWriteFailed){globalThis.__transferFeeWriteFailed=true;throw Error("Simulated transfer fee write failure");} db.exec({sql: "INSERT INTO expenses(id,account_id,category_id,amount_minor,date,note,created_at,transfer_id)',
+        );
+      if (storageFault.current === "transfer-fee-outbox-write")
+        return source.replace(
+          /db\.exec\(\{\s*sql: "INSERT INTO pending_sync_operations\(operation_id\) VALUES\(\?\)", bind: \[feeId\] \}\);/,
+          'if(!globalThis.__transferFeeOutboxFailed){globalThis.__transferFeeOutboxFailed=true;throw Error("Simulated transfer fee pending operation failure");} db.exec({sql: "INSERT INTO pending_sync_operations(operation_id) VALUES(?)", bind: [feeId]});',
+        );
+      if (storageFault.current === "transfer-outbox-write")
+        return source.replace(
+          /db\.exec\(\{\s*sql: "INSERT INTO pending_transfer_operations/,
+          'if(!globalThis.__transferOutboxFailed){globalThis.__transferOutboxFailed=true;throw Error("Simulated transfer operation failure");} db.exec({sql: "INSERT INTO pending_transfer_operations',
+        );
+      if (storageFault.current === "transfer-interrupt")
+        return source.replace(
+          /db\.exec\(\{\s*sql: "INSERT INTO pending_transfer_operations/,
+          'while(true) {} db.exec({sql: "INSERT INTO pending_transfer_operations',
+        );
+      if (storageFault.current === "transfer-reply")
+        return source.replace(
+          "self.postMessage({ id, result });",
+          "if (command !== 'createTransfer') self.postMessage({ id, result });",
+        );
       if (storageFault.current === "interrupt")
         return source.replace(
           /db\.exec\(\{\s*sql: "INSERT INTO accounts VALUES\([^)]+debit[^)]*\)"/,
@@ -82,12 +112,12 @@ const test = base.extend({
       if (storageFault.current === "downgrade-v2")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE transfers; DROP TABLE incomes; DROP TABLE income_categories; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "downgrade-v3")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV3") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; PRAGMA user_version=3;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV3") { transaction(() => db.exec("DROP TABLE pending_transaction_operations; DROP TABLE pending_transfer_operations; DROP TABLE pending_income_sync_operations; DROP TABLE incomes; DROP TABLE income_categories; DROP INDEX expenses_one_fee_per_transfer; ALTER TABLE expenses DROP COLUMN transfer_id; DROP TABLE transfers; PRAGMA user_version=3;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "account-rename")
         return source.replace(
@@ -99,10 +129,10 @@ const test = base.extend({
           "function migrateExpenses() {",
           'function migrateExpenses() { if (!globalThis.__migrationFailed) { globalThis.__migrationFailed = true; transaction(() => { db.exec("CREATE TABLE migration_trial(id INTEGER PRIMARY KEY)"); throw Error("Simulated migration failure"); }); }',
         );
-      if (storageFault.current === "income-migration")
+      if (storageFault.current === "transactions-migration")
         return source.replace(
           "function migrateIncomes() {",
-          'function migrateIncomes() { if (!globalThis.__incomeMigrationFailed) { globalThis.__incomeMigrationFailed = true; transaction(() => { db.exec("CREATE TABLE income_migration_trial(id INTEGER PRIMARY KEY)"); throw Error("Simulated income migration failure"); }); }',
+          'function migrateIncomes() { if (!globalThis.__incomeMigrationFailed) { globalThis.__incomeMigrationFailed = true; transaction(() => { db.exec("CREATE TABLE income_migration_trial(id INTEGER PRIMARY KEY)"); throw Error("Simulated version 4 migration failure"); }); }',
         );
       throw Error("Unknown test fault");
     });
@@ -416,7 +446,7 @@ test("saved setup reopens offline after full browser closure", async ({
 
 /** Run a test-only database command while retaining the real worker and OPFS database. */
 async function runWorkerCommand(page, command, args = {}) {
-  await page.evaluate(
+  return page.evaluate(
     async ({ command, args }) => {
       const worker = new Worker("/db-worker.js", { type: "module" });
       const send = (id, name, payload = {}) =>
@@ -432,8 +462,9 @@ async function runWorkerCommand(page, command, args = {}) {
           worker.postMessage({ id, command: name, args: payload });
         });
       try {
-        await send(1, command, args);
+        const result = await send(1, command, args);
         await send(2, "close");
+        return result;
       } finally {
         worker.terminate();
       }
@@ -473,7 +504,7 @@ test("failed version-three migration preserves a version-two account and can reo
   await expect(page.getByText("₱999.00", { exact: true })).toBeVisible();
 });
 
-test("failed income migration preserves version-three expense history", async ({
+test("failed version 4 migration preserves populated version-three history", async ({
   page,
   storageFault,
 }) => {
@@ -490,10 +521,10 @@ test("failed income migration preserves version-three expense history", async ({
   await page.getByRole("button", { name: "Close database", exact: true }).click();
   storageFault.current = "downgrade-v3";
   await runWorkerCommand(page, "testDowngradeV3");
-  storageFault.current = "income-migration";
+  storageFault.current = "transactions-migration";
   await page.reload();
   await expect(page.getByRole("alert")).toContainText(
-    "Simulated income migration failure",
+    "Simulated version 4 migration failure",
   );
 
   storageFault.current = null;
@@ -1006,4 +1037,411 @@ test("worker interruption during setup rolls back before retry", async ({
   await expect(
     page.getByText("Welcome, Anthony.", { exact: true }),
   ).toBeVisible();
+});
+
+test("same-currency transfer moves funds, records its fee, and reopens offline", async ({
+  browserName,
+  baseURL,
+}, testInfo) => {
+  const browserType = browserName === "webkit" ? webkit : chromium;
+  const directory = testInfo.outputPath("transfer-browser-profile");
+  let context = await browserType.launchPersistentContext(directory, { baseURL });
+  try {
+    let page = await context.newPage();
+    await fundedSetup(page);
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+    await page.getByRole("button", { name: "Add account", exact: true }).click();
+    await page.getByLabel("Account name", { exact: true }).fill("Savings");
+    await page.getByRole("button", { name: "Save account", exact: true }).click();
+    await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+    await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+
+    await expect(page.getByLabel("From account", { exact: true }).locator("option:checked")).toHaveText("Cash");
+    await expect(page.getByLabel("To account", { exact: true }).locator("option:checked")).toHaveText("Savings");
+    await page.getByLabel("Transfer amount", { exact: true }).fill("975");
+    await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("25");
+    await page.getByLabel("Transfer note", { exact: true }).fill("Move emergency cash");
+    const tomorrow = await page.evaluate(() => {
+      const date = new Date();
+      date.setDate(date.getDate() + 1);
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    });
+    await page.getByLabel("Transfer date", { exact: true }).fill(tomorrow);
+    await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+
+    await expect(page.getByText("₱0.00", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+    await expect(page.getByText("₱975.00", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+    await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+    await expect(page.getByText("Move emergency cash", { exact: true })).toBeVisible();
+    await expect(page.getByText("Transfer to Savings", { exact: true })).toBeVisible();
+    await expect(page.getByText("Bank transfer fee to Savings", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Edit Bank transfer fee to Savings", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Delete Bank transfer fee to Savings", exact: true })).toHaveCount(0);
+    await expect(page.getByText(/Fees · .* · Cash/)).toBeVisible();
+    await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
+
+    await page.evaluate(async () => navigator.serviceWorker.ready);
+    await context.close();
+    context = await browserType.launchPersistentContext(directory, { baseURL, offline: true });
+    page = await context.newPage();
+    await page.goto("/");
+    await expect(page.getByText("Welcome, Anthony.", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱0.00", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+    await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+    await expect(page.getByText("Move emergency cash", { exact: true })).toBeVisible();
+    await expect(page.getByText("Bank transfer fee to Savings", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Edit Bank transfer fee to Savings", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Delete Bank transfer fee to Savings", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Back to account", exact: true }).click();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+    await page.getByRole("button", { name: "View account Savings", exact: true }).click();
+    await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+    await expect(page.getByText("Transfer from Cash", { exact: true })).toBeVisible();
+    await expect(page.getByText("Move emergency cash", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱975.00", { exact: true })).toHaveCount(2);
+  } finally {
+    await context.close();
+  }
+});
+
+test("transfer input truncates excess precision and blocks invalid amounts or insufficient funds", async ({
+  page,
+}) => {
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Savings");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+
+  await page.getByLabel("Transfer amount", { exact: true }).fill("0");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("greater than zero");
+
+  await page.getByLabel("Transfer amount", { exact: true }).fill("1.234");
+  await expect(page.getByLabel("Transfer amount", { exact: true })).toHaveValue("1.23");
+
+  await page.getByLabel("Transfer amount", { exact: true }).fill("975");
+  await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("25.019");
+  await expect(page.getByLabel("Transfer fee (optional)", { exact: true })).toHaveValue("25.01");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Not enough balance");
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+});
+
+test("credit transfers use available credit and add the principal and fee to the owed balance", async ({ page }) => {
+  await setup(page);
+  await page.getByRole("button", { name: "Save my account", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Credit card");
+  await page.getByRole("radio", { name: "Credit", exact: true }).click();
+  await page.getByLabel("Credit limit (PHP)", { exact: true }).fill("150");
+  await page.getByRole("button", { name: "Add current balance", exact: true }).click();
+  await page.getByLabel("Current balance (PHP)", { exact: true }).fill("50");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Credit card", exact: true }).click();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await expect(page.getByText("₱100.00", { exact: true })).toBeVisible();
+  await page.getByLabel("To account", { exact: true }).selectOption({ label: "Cash" });
+  await page.getByLabel("Transfer amount", { exact: true }).fill("95.01");
+  await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Not enough available credit");
+
+  await page.getByLabel("Transfer amount", { exact: true }).fill("95");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByText("₱150.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await expect(page.getByText("₱95.00", { exact: true })).toBeVisible();
+});
+
+test("transfer retries reuse one operation and reject conflicting operation IDs", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  storageFault.current = "transfer-reply";
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Savings");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await page.getByLabel("Transfer amount", { exact: true }).fill("100");
+  await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Save confirmation timed out");
+  storageFault.current = null;
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByText("₱895.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await expect(page.getByText("₱100.00", { exact: true })).toBeVisible();
+  storageFault.current = null;
+
+  await page.getByRole("button", { name: "Close database", exact: true }).click();
+  const saved = await runWorkerCommand(page, "state");
+  const cash = saved.accounts.find((account) => account.name === "Cash");
+  const savings = saved.accounts.find((account) => account.name === "Savings");
+  const operationId = "stable-transfer-operation";
+  const input = {
+    operationId,
+    fromAccountId: cash.id,
+    toAccountId: savings.id,
+    amountMinor: 1000,
+    feeMinor: 0,
+    date: new Date().toISOString().slice(0, 10),
+    note: "Worker retry",
+  };
+  const first = await runWorkerCommand(page, "createTransfer", input);
+  expect(first.replayed).toBe(false);
+  const replay = await runWorkerCommand(page, "createTransfer", input);
+  expect(replay.replayed).toBe(true);
+  const conflict = await page.evaluate(async ({ input }) => {
+    const worker = new Worker("/db-worker.js", { type: "module" });
+    const send = (id, command, args = {}) => new Promise((resolve) => {
+      worker.addEventListener("message", ({ data }) => {
+        if (data.id === id) resolve(data);
+      });
+      worker.postMessage({ id, command, args });
+    });
+    const response = await send(1, "createTransfer", { ...input, amountMinor: 2000 });
+    await send(2, "close");
+    worker.terminate();
+    return response;
+  }, { input });
+  expect(conflict.error).toContain("different transfer details");
+  await page.reload();
+  await expect(page.getByText("₱885.00", { exact: true })).toBeVisible();
+});
+
+test("a failed transfer operation marker rolls back both accounts and its fee", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  storageFault.current = "transfer-outbox-write";
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Savings");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await page.getByLabel("Transfer amount", { exact: true }).fill("100");
+  await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated transfer operation failure");
+  storageFault.current = null;
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByText("₱895.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Bank transfer fee to Savings", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("Transfer to Savings", { exact: true })).toHaveCount(1);
+});
+
+test("a failed linked fee write rolls back the transfer and preserves the form for retry", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  storageFault.current = "transfer-fee-write";
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Savings");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await page.getByLabel("Transfer amount", { exact: true }).fill("100");
+  await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated transfer fee write failure");
+  storageFault.current = null;
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await page.getByLabel("Transfer amount", { exact: true }).fill("100");
+  await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByText("₱895.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await expect(page.getByText("₱100.00", { exact: true })).toBeVisible();
+});
+
+test("a failed fee sync marker rolls back both transfer effects before retry", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  storageFault.current = "transfer-fee-outbox-write";
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Savings");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await page.getByLabel("Transfer amount", { exact: true }).fill("100");
+  await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Simulated transfer fee pending operation failure");
+  storageFault.current = null;
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await page.getByLabel("Transfer amount", { exact: true }).fill("100");
+  await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByText("₱895.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await expect(page.getByText("₱100.00", { exact: true })).toBeVisible();
+});
+
+test("an interrupted transfer retries after the uncommitted account effects roll back", async ({
+  page,
+  storageFault,
+}) => {
+  storageFault.disableCache = true;
+  storageFault.current = "transfer-interrupt";
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Savings");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await page.getByLabel("Transfer amount", { exact: true }).fill("100");
+  await page.getByLabel("Transfer fee (optional)", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Save confirmation timed out");
+  await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+
+  storageFault.current = null;
+  await expect(async () => {
+    if (await page.getByRole("alert").isVisible())
+      await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+    await expect(page.getByText("₱895.00", { exact: true })).toBeVisible({ timeout: 1000 });
+  }).toPass({ timeout: 20000 });
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Bank transfer fee to Savings", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("Transfer to Savings", { exact: true })).toHaveCount(1);
+});
+
+test("JPY expenses and transfers use whole yen in history and derived balances", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Continue offline", exact: true }).click();
+  await page.getByLabel("Preferred name", { exact: true }).fill("Anthony");
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await page.getByRole("button", { name: "Skip introduction", exact: true }).click();
+  await page.getByRole("button", { name: "JPY Japanese Yen", exact: true }).click();
+  await page.getByRole("button", { name: "Next", exact: true }).click();
+  await page.getByLabel("Opening balance (JPY)", { exact: true }).fill("1000");
+  await page.getByRole("button", { name: "Save my account", exact: true }).click();
+  await expect(page.getByText(/(?:JP)?¥1,000/)).toBeVisible();
+
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("12.5");
+  await page.getByLabel("Expense note", { exact: true }).fill("Train");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByText(/(?:JP)?¥987/)).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText(/(?:JP)?¥13/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Savings");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await page.getByLabel("Transfer amount", { exact: true }).fill("12.5");
+  await expect(page.getByLabel("Transfer amount", { exact: true })).toHaveValue("12");
+  await page.getByLabel("Transfer amount", { exact: true }).fill("13");
+  await page.getByRole("button", { name: "Save transfer", exact: true }).click();
+  await expect(page.getByText(/(?:JP)?¥974/)).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await expect(page.getByText(/(?:JP)?¥13/)).toBeVisible();
+});
+
+test("transfer eligibility is visible and invalid account references leave no transfer", async ({
+  page,
+}) => {
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Investments");
+  await page.getByRole("radio", { name: "Assets", exact: true }).click();
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Foreign cash");
+  await page.getByRole("button", { name: "USD US Dollar", exact: true }).click();
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+  await page.getByRole("button", { name: "Transfer between accounts", exact: true }).click();
+  await expect(page.getByText("Add a debit account in PHP to receive a transfer.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save transfer", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Back to account", exact: true }).click();
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Close database", exact: true }).click();
+
+  const state = await runWorkerCommand(page, "state");
+  const cash = state.accounts.find((account) => account.name === "Cash");
+  const investments = state.accounts.find((account) => account.name === "Investments");
+  const foreignCash = state.accounts.find((account) => account.name === "Foreign cash");
+  const errors = await page.evaluate(async ({ cashId, assetsId, foreignId, date }) => {
+    const worker = new Worker("/db-worker.js", { type: "module" });
+    let id = 1;
+    const send = (command, args = {}) => new Promise((resolve) => {
+      const requestId = id++;
+      const onMessage = ({ data }) => {
+        if (data.id !== requestId) return;
+        worker.removeEventListener("message", onMessage);
+        resolve(data);
+      };
+      worker.addEventListener("message", onMessage);
+      worker.postMessage({ id: requestId, command, args });
+    });
+    const base = { amountMinor: 100, feeMinor: 0, date };
+    const cases = [
+      { operationId: "invalid-identical", fromAccountId: cashId, toAccountId: cashId },
+      { operationId: "invalid-missing", fromAccountId: cashId, toAccountId: "missing-account" },
+      { operationId: "invalid-assets", fromAccountId: cashId, toAccountId: assetsId },
+      { operationId: "invalid-currency", fromAccountId: cashId, toAccountId: foreignId },
+    ];
+    const messages = [];
+    for (const input of cases) {
+      const response = await send("createTransfer", { ...base, ...input });
+      messages.push(response.error);
+    }
+    await send("close");
+    worker.terminate();
+    return messages;
+  }, {
+    cashId: cash.id,
+    assetsId: investments.id,
+    foreignId: foreignCash.id,
+    date: new Date().toISOString().slice(0, 10),
+  });
+  expect(errors).toEqual([
+    "Choose two different accounts.",
+    "Choose available transfer accounts.",
+    "Transfers require a debit or credit source and a debit destination.",
+    "Choose accounts with the same currency.",
+  ]);
+  const ledger = await runWorkerCommand(page, "ledger", { accountId: cash.id });
+  expect(ledger.account.balance_minor).toBe(100000);
+  expect(ledger.transfers).toEqual([]);
 });
