@@ -23,7 +23,7 @@ const cream = "#f9f5eb",
   ink = "#293c32",
   sage = "#486b51";
 
-/** Return the supported Kuwi currency's fraction precision. */
+/** Return fraction digits for the currencies currently offered by Kuwi. */
 function decimalPlaces(currency: string) {
   return currency === "JPY" ? 0 : 2;
 }
@@ -36,7 +36,7 @@ function amountText(amountMinor: number, currency: string) {
   return `${whole}.${(amountMinor % scale).toString().padStart(2, "0")}`;
 }
 
-/** Parse decimal text into safe integer minor units, or null when it is invalid. */
+/** Parse nonnegative decimal text into safe integer minor units, or return null if invalid. */
 function amountMinor(text: string, currency: string) {
   const digits = decimalPlaces(currency);
   const expression = digits === 0 ? /^\d+$/ : /^\d+(\.\d{0,2})?$/;
@@ -55,7 +55,7 @@ function cleanAmountInput(text: string, currency: string) {
   return `${whole}.${pieces.slice(1).join("").slice(0, digits)}`;
 }
 
-/** Format stored minor units for account-list display in the selected currency. */
+/** Format stored minor units for account display using the selected currency's precision. */
 function formatMoney(amount: number, currency: string) {
   return new Intl.NumberFormat("en-PH", {
     style: "currency",
@@ -89,7 +89,7 @@ export default function Home() {
   const [operation, setOperation] = useState<{ key: string; id: string } | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
   /**
-   * Replace the worker and read canonical setup, updating saved data and phase.
+   * Reopen the worker and read canonical setup, updating saved data and phase.
    * Resolves after startup succeeds or its failure is displayed; callers reset
    * loading/error state before an explicit retry.
    */
@@ -144,7 +144,12 @@ export default function Home() {
     setCreditOwedEnabled(false);
   }
 
-  /** Reuse one operation ID while form content stays the same after a save failure. */
+  /**
+   * Reuse the current operation ID for an unchanged retry, or create a new one when input changes.
+   * @param command - Database write command included in the retry identity.
+   * @param payload - Normalized form fields included in the retry identity.
+   * @returns The stable ID the database uses to deduplicate this submission.
+   */
   function operationId(command: string, payload: object) {
     const key = JSON.stringify([command, payload]);
     if (!operation || operation.key !== key) {
@@ -158,6 +163,7 @@ export default function Home() {
   /**
    * Validate form text, save the account command, and reload committed SQLite state.
    * The operation ID survives a failed response while the normalized content is unchanged.
+   * Storage and validation errors stay visible in the form.
    */
   async function saveAccount() {
     if (!saved || !accountForm) return;

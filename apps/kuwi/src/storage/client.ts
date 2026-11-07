@@ -32,7 +32,7 @@ const pending = new Map<
 >();
 
 /**
- * Terminate the worker and reject every unfinished call.
+ * Stop the current worker and reject every pending request with the supplied error.
  * @param error - Failure to report to all calls waiting on this worker.
  */
 function stopWorker(error: Error) {
@@ -51,6 +51,7 @@ function stopWorker(error: Error) {
  * reads wait up to 60 seconds for OPFS initialization.
  * @param command - A supported worker command.
  * @param args - Command-specific values passed to the dedicated worker.
+ * @returns The command result, or a rejected promise when the worker reports or encounters an error.
  */
 export function database(
   command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "close",
@@ -90,6 +91,7 @@ export function database(
 /**
  * Close the database before releasing ownership for another tab.
  * Any call still waiting when the worker stops rejects with a close error.
+ * @returns A promise that resolves after the worker releases database ownership.
  */
 export async function closeDatabase() {
   if (worker) {

@@ -30,7 +30,7 @@ function transaction(write) {
   }
 }
 
-/** Create schema v2 and its six currencies for an empty installation. */
+/** Create the v2 schema and six supported currencies for an empty installation. */
 function createSchema() {
   db.exec(`
     CREATE TABLE currencies(code TEXT PRIMARY KEY NOT NULL, decimal_places INTEGER NOT NULL CHECK(decimal_places BETWEEN 0 AND 3)) STRICT;
@@ -125,6 +125,8 @@ function migrateV1() {
  * Own the OPFS database lock for the connection lifetime and initialize SQLite.
  * Fresh creation and v1 migration happen before any command can read or write data.
  * Unsupported versions and migration errors leave the existing store intact.
+ * @throws {Error} OPFS or Web Locks is unavailable, another tab owns the database,
+ *   the database version is unsupported, or initialization fails.
  */
 async function open() {
   if (db) return;
@@ -283,6 +285,8 @@ function addOpeningAdjustment(accountId, balanceMinor, createdAt) {
  * Save an account, optional opening adjustment, and retry record in one transaction.
  * Repeating the operation ID with identical normalized fields returns the saved row.
  * @param {object} args - Account fields and caller-supplied operation ID.
+ * @returns {Promise<object>} The committed account with its derived balance.
+ * @throws {Error} Validation fails, the operation ID conflicts, or SQLite rejects a write.
  */
 async function createAccount(args) {
   const accountDetails = normalizedAccount(args);
@@ -313,6 +317,9 @@ async function createAccount(args) {
  * Update editable account terms while protecting balance and currency after an adjustment.
  * Credit limits remain editable; a same-content retry returns the committed account.
  * @param {object} args - Account ID, editable fields, and caller-supplied operation ID.
+ * @returns {Promise<object>} The updated account with its derived balance.
+ * @throws {Error} The account is missing, validation or linked-activity checks fail,
+ *   the operation ID conflicts, or SQLite rejects a write.
  */
 async function updateAccount(args) {
   const existing = account(args.accountId);
@@ -353,6 +360,8 @@ async function updateAccount(args) {
  * Save first-run profile, account, optional starting adjustment, and retry record atomically.
  * A completed setup is returned unchanged when onboarding is submitted again.
  * @param {object} args - Validated onboarding fields and stable setup operation ID.
+ * @returns {Promise<object>} The saved setup and its accounts.
+ * @throws {Error} Validation fails, the operation ID conflicts, or a related write fails.
  */
 async function complete(args) {
   const name = args.name?.trim(),
@@ -391,7 +400,7 @@ async function complete(args) {
 }
 
 /**
- * Run one queued storage command and report failures to its caller.
+ * Run one queued storage command, posting its result or error to the requesting page.
  * @param {object} message - Worker request with response ID, command, and optional args.
  */
 async function dispatch({ id, command, args = {} }) {
