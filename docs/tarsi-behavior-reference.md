@@ -99,11 +99,75 @@ for the account currency. A future-dated entry is marked planned unless it
 already has that flag. The precise Shortcut matching rule remains untraced.
 
 Posting updates the account balance only when its date is today or earlier,
-the entry is not planned, and balance effects are enabled. Historical statement
-entries are excluded through an ID helper. Eligible cashback creates a linked
-income and updates its account balance in the same returned state update.
+the entry is not planned, and `affectsAccountBalance` is not false. Historical
+statement entries are excluded through an ID helper. Eligible cashback creates
+a linked income and updates its account balance in the same returned state update.
 Recurring-entry reconciliation also runs. This is an in-memory state update;
 device persistence follows separately.
+
+### Ordinary expense entry
+
+Checked 2026-11-07 from the shipped web `add-expense` chunk, Metro module 2591,
+and common-bundle modules 1685, 1701, 1709, and 1728. The lazy chunk has SHA-256
+`98677be132d94743c935cf788959c44ff21ffe3829226355dc21f7cdbdeb0c83`; its
+provenance is recorded in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-web-lazy-20261107/provenance.json`.
+The common bundle SHA-256 is
+`ccac38fefe6008c3988e03c933635bd4fcd1f19ae52b5179f623197bd7cda943`; extracted
+module byte ranges and hashes are in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-focused-modules-20261107/provenance.json`.
+This is static web code inspection. No target code ran, and it does not verify
+iPhone 2.5.9 behavior.
+
+The built-in expense categories are Food (`food`), Transport (`transport`),
+Phone (`phone`), Bills (`bills`), Shopping (`shopping`), Fun (`entertainment`),
+Health (`health`), Fees (`fees`), and Other (`other`). The form also asks the
+store for visible categories, so custom-category behavior is a separate Pro
+path. An unset category resolves to `other` at save time.
+
+The ordinary entry initializes its date to today. Its web date picker passes no
+minimum or maximum date. The save guard requires a selected account and a
+resolved currency conversion, and requires an amount above zero for an ordinary
+current or past expense. A future one-time date is classified as planned; a
+zero amount is allowed only for a future or recurring entry under that guard.
+The quick-entry path falls back to today when its date is not a `YYYY-MM-DD`
+string. Date parsing beyond that shape check and the native calendar boundaries
+were not traced. Kuwi's first expense stage accepts current and past dates only;
+it does not claim Tarsi date-boundary parity.
+
+Currency module 1701 reports zero minor digits for JPY, KRW, and CLP, three for
+KWD, BHD, and OMR, and two for other codes. The display-currency set is separate
+and includes VND, which still uses two digits in the traced rounding helper.
+That helper leaves nonfinite values at zero and otherwise applies
+`Math.round((amount + Number.EPSILON) * 10 ** digits) / 10 ** digits`, including
+JavaScript's negative-half rounding behavior. Examples: PHP 12.345 becomes
+12.35, JPY 12.5 becomes 13, and KWD 12.3456 becomes 12.346. Currency module
+1685 rounds the expense in the account currency, falling back to the preferred
+currency, and rounds a finite original amount in its original currency.
+`parseCurrencyToNumber` removes commas, uses `parseFloat`, maps NaN to zero,
+then rounds. The expense chunk's ordinary save guard rejects negative and
+nonfinite values and requires a positive amount for a nonfuture one-time entry.
+It does not establish one universal textual-input grammar.
+
+For the verified posting example with today 2026-11-07, a regular PHP 10 entry
+dated 2026-11-07 posts; one dated 2026-11-08 is marked planned and does not
+post; an explicitly planned entry dated 2026-11-07 also does not post. Posting
+requires an account, a date no later than today, a non-planned entry, and
+`affectsAccountBalance` not set to false. The helper excludes historical
+statement IDs. The traced expense path has no separate available-balance
+threshold; for a debit account, the balance helper subtracts the expense amount.
+An eligible positive cashback value creates a linked income. Cashback, bill splits, recurring
+expenses, installments, edits, and deletions are outside Kuwi ticket #4's
+ordinary one-time entry and remain unverified for Kuwi.
+
+These findings were checked against the supplied focused extractions and the
+original cached bundles identified above. The expense chunk depends on common
+category helpers for visible-category filtering, ID resolution, and subcategory
+validation; module 1685 contains the account/store posting path, 1701 currency
+rounding, 1709 balance adjustment, and 1728 category definitions and category
+resolution. Evidence is static and platform-specific. No runtime validation,
+native comparison, minimum historical date, or linked-effect rule beyond the
+eligible cashback path is claimed.
 
 Transfers reject nonpositive amounts, identical source/destination accounts,
 missing accounts, and failed eligibility checks. The action rounds source and

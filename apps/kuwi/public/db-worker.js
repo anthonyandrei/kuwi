@@ -59,7 +59,7 @@ async function open() {
               "PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA journal_mode=DELETE; PRAGMA trusted_schema=OFF;",
             );
             const version = db.selectValue("PRAGMA user_version");
-            if (version !== 0 && version !== 1)
+            if (version !== 0 && version !== 1 && version !== 2)
               throw Error(
                 "Unsupported database version. Existing data has been preserved.",
               );
@@ -72,6 +72,30 @@ async function open() {
      CREATE TABLE accounts(id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL CHECK(length(trim(name))>0), currency_code TEXT NOT NULL REFERENCES currencies(code), opening_balance_minor INTEGER NOT NULL) STRICT;
      CREATE TABLE setup(id INTEGER PRIMARY KEY CHECK(id=1), profile_id TEXT NOT NULL UNIQUE REFERENCES profiles(id), first_account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id), completed_at TEXT NOT NULL) STRICT;
      PRAGMA user_version=1;
+    `),
+              );
+            if (version < 2)
+              transaction(() =>
+                db.exec(`
+     CREATE TABLE categories(id TEXT PRIMARY KEY NOT NULL, label TEXT NOT NULL, sort_order INTEGER NOT NULL UNIQUE CHECK(sort_order>=0)) STRICT;
+     INSERT INTO categories VALUES
+       ('food','Food',0),('transport','Transport',1),('phone','Phone',2),
+       ('bills','Bills',3),('shopping','Shopping',4),('entertainment','Fun',5),
+       ('health','Health',6),('fees','Fees',7),('other','Other',8);
+     CREATE TABLE expenses(
+       id TEXT PRIMARY KEY NOT NULL,
+       account_id TEXT NOT NULL REFERENCES accounts(id),
+       category_id TEXT NOT NULL REFERENCES categories(id),
+       amount_minor INTEGER NOT NULL CHECK(amount_minor>0),
+       date TEXT NOT NULL CHECK(length(date)=10),
+       note TEXT,
+       created_at TEXT NOT NULL
+     ) STRICT;
+     CREATE INDEX expenses_by_account_date ON expenses(account_id, date DESC, created_at DESC);
+     CREATE TABLE pending_sync_operations(
+       operation_id TEXT PRIMARY KEY NOT NULL REFERENCES expenses(id)
+     ) STRICT;
+     PRAGMA user_version=2;
     `),
               );
             const lifetime = new Promise((done) => {
@@ -98,6 +122,85 @@ function state() {
       `SELECT p.preferred_name, p.preferred_currency, a.id AS account_id, a.name AS account_name, a.currency_code, a.opening_balance_minor FROM setup s JOIN profiles p ON p.id=s.profile_id JOIN accounts a ON a.id=s.first_account_id WHERE s.id=1`,
     )[0] ?? null
   );
+}
+/** Return the first account, active expense categories, and saved expenses by reference ID. */
+function readLedger() {
+  const account = rows(
+    `SELECT p.preferred_name, p.preferred_currency, a.id AS account_id, a.name AS account_name, a.currency_code, a.opening_balance_minor, c.decimal_places, a.opening_balance_minor - COALESCE((SELECT SUM(e.amount_minor) FROM expenses e WHERE e.account_id=a.id AND e.date<=?),0) AS balance_minor FROM setup s JOIN profiles p ON p.id=s.profile_id JOIN accounts a ON a.id=s.first_account_id JOIN currencies c ON c.code=a.currency_code WHERE s.id=1`,
+    [localDate()],
+  )[0];
+  if (!account) return null;
+  return {
+    account,
+    categories: rows("SELECT id, label FROM categories ORDER BY sort_order"),
+    expenses: rows(
+      `SELECT e.id, p.operation_id, e.account_id, e.category_id, c.label AS category_label, e.amount_minor, e.date, e.note, e.created_at FROM expenses e JOIN categories c ON c.id=e.category_id JOIN pending_sync_operations p ON p.operation_id=e.id WHERE e.account_id=? ORDER BY e.date DESC, e.created_at DESC, e.id DESC`,
+      [account.account_id],
+    ),
+  };
+}
+/** Format the browser's local calendar date for date-only financial entries. */
+function localDate() {
+  const date = new Date();
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+/** Accept only real YYYY-MM-DD dates, excluding timezone-dependent parsing. */
+function isValidDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value))
+    return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 10) === value;
+}
+/** Save an ordinary posted expense and its pending sync operation in one transaction. */
+function createExpense(args) {
+  const operationId = args.operationId?.trim();
+  const accountId = args.accountId;
+  const categoryId = args.categoryId || "other";
+  const amountMinor = args.amountMinor;
+  const date = args.date;
+  const note = args.note?.trim() || null;
+  if (!operationId || !Number.isSafeInteger(amountMinor) || amountMinor <= 0)
+    throw Error("Enter an expense amount greater than zero.");
+  if (!isValidDate(date)) throw Error("Choose a valid expense date.");
+  if (date > localDate()) throw Error("Choose today or an earlier date.");
+  const account = rows(
+    "SELECT id FROM accounts WHERE id=? AND EXISTS (SELECT 1 FROM setup WHERE first_account_id=accounts.id)",
+    [accountId],
+  )[0];
+  if (!account) throw Error("Choose an available account.");
+  if (!rows("SELECT id FROM categories WHERE id=?", [categoryId])[0])
+    throw Error("Choose a valid expense category.");
+
+  let replayed = false;
+  transaction(() => {
+    const existing = rows(
+      `SELECT e.account_id, e.category_id, e.amount_minor, e.date, e.note FROM expenses e JOIN pending_sync_operations p ON p.operation_id=e.id WHERE p.operation_id=?`,
+      [operationId],
+    )[0];
+    if (existing) {
+      if (
+        existing.account_id !== accountId ||
+        existing.category_id !== categoryId ||
+        existing.amount_minor !== amountMinor ||
+        existing.date !== date ||
+        existing.note !== note
+      )
+        throw Error("This save retry contains different expense details.");
+      replayed = true;
+      return;
+    }
+    const createdAt = new Date().toISOString();
+    db.exec({
+      sql: "INSERT INTO expenses(id, account_id, category_id, amount_minor, date, note, created_at) VALUES(?,?,?,?,?,?,?)",
+      bind: [operationId, accountId, categoryId, amountMinor, date, note, createdAt],
+    });
+    db.exec({
+      sql: "INSERT INTO pending_sync_operations(operation_id) VALUES(?)",
+      bind: [operationId],
+    });
+  });
+  return { ledger: readLedger(), replayed };
 }
 /**
  * Save setup exactly once. Failed related inserts roll back all setup records.
@@ -146,6 +249,8 @@ async function dispatch({ id, command, args = {} }) {
     let result;
     if (command === "state") result = state();
     else if (command === "complete") result = complete(args);
+    else if (command === "ledger") result = readLedger();
+    else if (command === "createExpense") result = createExpense(args);
     else throw Error("Unknown database operation.");
     self.postMessage({ id, result });
   } catch (error) {

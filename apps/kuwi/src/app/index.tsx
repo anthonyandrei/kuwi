@@ -10,7 +10,13 @@ import {
   View,
 } from "react-native";
 import Animated, { FadeIn, ReduceMotion } from "react-native-reanimated";
-import { closeDatabase, database, type Setup } from "../storage/client";
+import {
+  closeDatabase,
+  database,
+  type Ledger,
+  type Setup,
+} from "../storage/client";
+import { ExpenseWorkspace } from "../expenses/ExpenseWorkspace";
 const currencies = [
   ["PHP", "Philippine Peso"],
   ["USD", "US Dollar"],
@@ -26,6 +32,8 @@ const cream = "#f9f5eb",
 export default function Home() {
   const [saved, setSaved] = useState<Setup | null>(null),
     [phase, setPhase] = useState("loading");
+  const [ledger, setLedger] = useState<Ledger | null>(null);
+  const [screen, setScreen] = useState<"home" | "expense" | "history">("home");
   const [name, setName] = useState(""),
     [account, setAccount] = useState("Cash"),
     [amount, setAmount] = useState("0");
@@ -45,16 +53,16 @@ export default function Home() {
   function load() {
     return closeDatabase()
       .then(() => database("state"))
-      .then(
-        (state) => {
-          setSaved(state);
-          setPhase("ready");
-        },
-        (failure: Error) => {
-          setError(failure.message);
-          setPhase("error");
-        },
-      );
+      .then(async (state) => {
+        const nextLedger = state ? await database<Ledger | null>("ledger") : null;
+        setSaved(state);
+        setLedger(nextLedger);
+        setPhase("ready");
+      })
+      .catch((failure: Error) => {
+        setError(failure.message);
+        setPhase("error");
+      });
   }
   useEffect(() => {
     void load();
@@ -84,14 +92,14 @@ export default function Home() {
     setSaving(true);
     setError("");
     try {
-      setSaved(
-        await database("complete", {
-          name,
-          account,
-          currency,
-          amountMinor: minor,
-        }),
-      );
+      const completed = await database("complete", {
+        name,
+        account,
+        currency,
+        amountMinor: minor,
+      });
+      setSaved(completed);
+      setLedger(completed ? await database<Ledger | null>("ledger") : null);
       setCelebrating(true);
     } catch (e) {
       setError((e as Error).message);
@@ -204,7 +212,7 @@ export default function Home() {
               void load();
             })}
           </View>
-        ) : saved ? (
+        ) : saved && ledger && screen === "home" ? (
           <View style={s.content}>
             <Text style={s.title}>Welcome, {saved.preferred_name}.</Text>
             <Text style={s.copy}>
@@ -216,22 +224,35 @@ export default function Home() {
               ? button("See my account", () => setCelebrating(false))
               : null}
             <View style={s.account}>
-              <Text style={s.label}>{saved.account_name}</Text>
+              <Text style={s.label}>{ledger.account.account_name}</Text>
               <Text style={s.balance}>
                 {new Intl.NumberFormat("en-PH", {
                   style: "currency",
-                  currency: saved.currency_code,
+                  currency: ledger.account.currency_code,
+                  minimumFractionDigits: ledger.account.decimal_places,
+                  maximumFractionDigits: ledger.account.decimal_places,
                 }).format(
-                  saved.opening_balance_minor /
-                    (saved.currency_code === "JPY" ? 1 : 100),
+                  ledger.account.balance_minor /
+                    10 ** ledger.account.decimal_places,
                 )}
               </Text>
             </View>
             <Text style={s.copy}>
               Saved on this device. No sign-in required.
             </Text>
+            {button("Add expense", () => setScreen("expense"))}
+            {button("Transaction history", () => setScreen("history"))}
             {button("Close database", () => void close())}
           </View>
+        ) : saved && ledger ? (
+          <ExpenseWorkspace
+            mode={screen === "history" ? "history" : "expense"}
+            ledger={ledger}
+            onBack={() => setScreen("home")}
+            onLedgerChange={setLedger}
+          />
+        ) : saved ? (
+          <Text style={s.copy}>Opening your local account…</Text>
         ) : (
           <View style={s.content}>
             <Animated.View
