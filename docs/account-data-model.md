@@ -60,6 +60,8 @@ Credit accounts; the recovered income form does not offer Assets accounts.
 | `expenses.transfer_id` | nullable foreign key | `transfer_id` → `transfers.id`; identifies the linked transfer-fee expense. The fee amount and category are stored on the expense. |
 | `pending_transfer_operations` | `operation_id` | `operation_id` → `transfers.id`, SHA-256 request fingerprint; marks the transfer for local sync and stable retries. |
 | `pending_transaction_operations` | `operation_id` | Transaction kind and ID, edit/delete type, request fingerprint, and creation time. Delete receipts retain IDs after their transaction row is removed. |
+| `budgets` | `category_id` | One normalized definition per expense category: fixed amount or percentage basis points, interval, optional rollover tracking, and optional bi-weekly anchor dates. |
+| `pending_budget_operations` | `operation_id` | Category ID, save/clear type, SHA-256 request fingerprint, and creation time for stable retries and future local sync. |
 
 The non-key dependencies are `code → decimal_places`, `profile id → preferred
 name, preferred currency`, `account id → name, type, currency, credit limit,
@@ -74,6 +76,15 @@ and creation time. This relation has no foreign key because delete receipts must
 outlive their transaction rows. `setup.id` identifies one profile and its first
 account.
 
+`budgets.category_id → amount_milli, type, percentage_basis_points, interval,
+rollover_enabled, rollover_started_at, biweekly_start_date, biweekly_end_date`.
+`pending_budget_operations.operation_id → category_id, operation_type,
+request_fingerprint, created_at`. A percentage budget stores its percentage in
+integer hundredths of one percent and a zero amount. A fixed budget stores an
+amount in thousandths of the preferred currency unit. Zero-save deletes the
+definition and records a clear receipt. Progress is derived from current
+expense and income rows; no spending total is stored in the budget relation.
+
 `transfer id → source account, destination account, principal, date, note, and
 creation time`. A fee is an expense in the `fees` category whose `transfer_id`
 points to the transfer. The transfer does not store a second fee amount.
@@ -86,6 +97,14 @@ while a debit destination receives the principal. A credit source owes the
 principal and fee. Account name and currency are stored once and referenced by
 ID from linked facts. Credit limits are account terms, while credit balances
 come from adjustment and transaction facts.
+
+Budgets cover all accounts. The calculator selects ordinary expenses by
+category and inclusive period, then derives fixed or income-based limits and
+progress. Transfer principal lives only in `transfers` and is excluded. A
+positive transfer fee is the linked `fees` expense, so it contributes once.
+Percentage bases include actual incomes across accounts and categories, with
+planned income excluded. Kuwi has no FX quote source; a qualifying entry in a
+different currency makes progress unavailable until quotes exist.
 
 ## Write and retry contract
 
@@ -131,7 +150,13 @@ in earlier v4 databases that already have transfers. It also upgrades v5
 databases with transaction receipts but no transfers. Migrations preserve
 account, expense, income, category, and setup IDs.
 
+Version 7 adds normalized category budgets and pending budget operation
+receipts. The v7 migration runs after transfer relations, so transfer fees stay
+ordinary linked expenses and transfer principal remains separate. This budget
+branch includes transfer implementation `d77e7b2af16f1731fa346ffe76f22e93611dbe3a`
+before adding the v7 relations, keeping budget calculations aligned with the
+merged transfer schema.
+
 The adjustment table currently accepts initial balances only. Manual balance
-adjustments, account deletion, loan schedules, investments, budgets, and
-cloud-sync delivery need their own verified rules and schema changes before
-implementation.
+adjustments, account deletion, loan schedules, investments, and cloud-sync
+delivery need their own verified rules and schema changes before implementation.

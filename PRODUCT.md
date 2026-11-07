@@ -53,12 +53,12 @@ transfers, budgets, and backup/restore. Wider browser parity includes
 assessment of Tarsi Pro and Cloud workflows, with browser limitations made
 explicit. These are delivery goals, not claims that the features already ship.
 
-The app in `apps/kuwi` implements local onboarding, account setup, expense
-entry, and ordinary income entry with a combined transaction history. Income
-follows verified shipped-web rules; physical iPhone acceptance for this flow
-is pending. Home, grouped Wallet, transfers, budgets, backup/restore, and the
-remaining finance workflows are outstanding. Clerk and Convex are not
-provisioned.
+The app in `apps/kuwi` implements local onboarding, accounts, expenses,
+ordinary income, same-currency transfers, category budgets, and backup/restore.
+These workflows use local SQLite storage. Browser journeys for the current
+integrated build and physical iPhone acceptance for finance workflows remain
+pending. Home, grouped Wallet, wider currency transfer, and the remaining
+finance workflows are outstanding. Clerk and Convex are not provisioned.
 
 Use the accepted Expo, React Native Web, Expo Router, and Reanimated client.
 Keep durable local data in SQLite/WASM with OPFS SAHPool. Convex is the selected

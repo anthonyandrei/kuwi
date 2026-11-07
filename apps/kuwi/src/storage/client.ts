@@ -57,6 +57,47 @@ export type TransferRecord = {
   fee_amount_minor: number;
   direction: "incoming" | "outgoing";
 };
+export type BudgetProgress = {
+  period: { start: string; end: string };
+  available: boolean;
+  missingCurrencies: string[];
+  limit: number | null;
+  spent: number | null;
+  remaining: number | null;
+  progressPercent: number | null;
+  incomeBase: number | null;
+};
+export type BudgetSummary = Omit<BudgetProgress, "period" | "incomeBase">;
+export type BudgetRecord = BudgetProgress & {
+  category_id: string;
+  category_label: string;
+  amount_milli: number;
+  type: "fixed" | "percentage";
+  percentage_basis_points: number | null;
+  interval: "daily" | "weekly" | "bi-weekly" | "monthly" | "annually";
+  rollover_enabled: number;
+  rollover_started_at: string | null;
+  biweekly_start_date: string | null;
+  biweekly_end_date: string | null;
+};
+export type BudgetState = {
+  preferredCurrency: string | null;
+  categories: ExpenseCategory[];
+  budgets: BudgetRecord[];
+  summary: BudgetSummary | null;
+};
+export type SaveBudgetInput = {
+  operationId: string;
+  categoryId: string;
+  type: "fixed" | "percentage";
+  amountMilli: number;
+  percentageBasisPoints: number | null;
+  interval: BudgetRecord["interval"];
+  rolloverEnabled: boolean;
+  biweeklyStartDate?: string;
+  biweeklyEndDate?: string;
+};
+export type SaveBudgetResult = { state: BudgetState; replayed: boolean };
 export type CreateExpenseInput = {
   operationId: string;
   accountId: string;
@@ -186,6 +227,24 @@ export type BackupPendingTransactionOperation = {
   request_fingerprint: string;
   created_at: string;
 };
+export type BackupBudget = {
+  category_id: string;
+  amount_milli: number;
+  type: "fixed" | "percentage";
+  percentage_basis_points: number | null;
+  interval: BudgetRecord["interval"];
+  rollover_enabled: number;
+  rollover_started_at: string | null;
+  biweekly_start_date: string | null;
+  biweekly_end_date: string | null;
+};
+export type BackupPendingBudgetOperation = {
+  operation_id: string;
+  category_id: string;
+  operation_type: "save" | "clear";
+  request_fingerprint: string;
+  created_at: string;
+};
 export type ProductBackupData = {
   currencies: BackupCurrency[];
   profiles: BackupProfile[];
@@ -202,11 +261,13 @@ export type ProductBackupData = {
   incomes: BackupIncome[];
   pendingIncomeSyncOperations: BackupPendingIncomeSyncOperation[];
   pendingTransactionOperations: BackupPendingTransactionOperation[];
+  budgets: BackupBudget[];
+  pendingBudgetOperations: BackupPendingBudgetOperation[];
 };
 export type ProductBackup = {
   format: "kuwi.backup";
   version: 1;
-  schemaVersion: 6;
+  schemaVersion: 7;
   exportedAt: string;
   integrity: { algorithm: "SHA-256"; digest: string };
   data: ProductBackupData;
@@ -220,8 +281,39 @@ export type DatabaseResult =
   | CreateTransactionResult
   | CreateExpenseResult
   | CreateTransferResult
+  | BudgetState
+  | SaveBudgetResult
   | ProductBackup
   | null;
+type DatabaseCommand =
+  | "state"
+  | "accounts"
+  | "account.create"
+  | "account.update"
+  | "complete"
+  | "ledger"
+  | "createExpense"
+  | "createIncome"
+  | "createTransfer"
+  | "updateTransaction"
+  | "deleteTransaction"
+  | "budgetState"
+  | "saveBudget"
+  | "exportBackup"
+  | "restoreBackup"
+  | "close";
+const writeTimeoutMessages: Partial<Record<DatabaseCommand, string>> = {
+  complete: "Save confirmation timed out. Retry account setup to check whether it was saved.",
+  "account.create": "Save confirmation timed out. Retry the account change to check whether it was saved.",
+  "account.update": "Save confirmation timed out. Retry the account change to check whether it was saved.",
+  createExpense: "Save confirmation timed out. Retry to check whether your expense was saved.",
+  createIncome: "Save confirmation timed out. Retry to check whether your income was saved.",
+  createTransfer: "Save confirmation timed out. Retry to check whether your transfer was saved.",
+  updateTransaction: "Save confirmation timed out. Reopen transaction history before retrying this change.",
+  deleteTransaction: "Save confirmation timed out. Reopen transaction history before retrying this change.",
+  saveBudget: "Save confirmation timed out. Retry the budget change to check whether it was saved.",
+  restoreBackup: "Restore confirmation timed out. Reopen your saved data before retrying the backup.",
+};
 
 let worker: Worker | undefined;
 let sequence = 0;
@@ -252,12 +344,12 @@ function stopWorker(error: Error) {
  * Send a worker command and surface its result or failure to the caller.
  * Writes time out after 15 seconds so the caller can retry with its stable operation ID;
  * reads wait up to 60 seconds for OPFS initialization.
- * @param command - A supported setup, account, ledger, transaction, transfer, backup, or close command.
+ * @param command - A supported setup, account, ledger, transaction, transfer, budget, backup, or close command.
  * @param args - Command-specific values sent to the dedicated database worker.
  * @returns The typed command result; the promise rejects on worker errors or timeout.
  */
 export function database<T extends DatabaseResult = DatabaseResult>(
-  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "createIncome" | "createTransfer" | "updateTransaction" | "deleteTransaction" | "exportBackup" | "restoreBackup" | "close",
+  command: DatabaseCommand,
   args: object = {},
 ): Promise<T> {
   if (!worker) {
@@ -274,23 +366,13 @@ export function database<T extends DatabaseResult = DatabaseResult>(
   }
   return new Promise((resolve, reject) => {
     const id = ++sequence;
-    const isWrite = command === "complete" || command === "createExpense" || command === "createIncome" || command === "createTransfer" || command === "updateTransaction" || command === "deleteTransaction" || command === "restoreBackup" || command.startsWith("account.");
+    const isWrite = command === "complete" || command === "createExpense" || command === "createIncome" || command === "createTransfer" || command === "updateTransaction" || command === "deleteTransaction" || command === "saveBudget" || command === "restoreBackup" || command.startsWith("account.");
     const timer = setTimeout(
       () =>
         stopWorker(
           Error(
             isWrite
-              ? command === "createExpense"
-                ? "Save confirmation timed out. Retry to check whether your expense was saved."
-                : command === "createIncome"
-                  ? "Save confirmation timed out. Retry to check whether your income was saved."
-                  : command === "createTransfer"
-                    ? "Save confirmation timed out. Retry to check whether your transfer was saved."
-                    : command === "restoreBackup"
-                    ? "Restore confirmation timed out. Reopen your saved data before retrying the backup."
-                    : command === "updateTransaction" || command === "deleteTransaction"
-                      ? "Save confirmation timed out. Reopen transaction history before retrying this change."
-                    : "Save confirmation timed out. Retry the account change to check whether it was saved."
+              ? writeTimeoutMessages[command] ?? "Save confirmation timed out. Retry the change to check whether it was saved."
               : "Opening local storage timed out. Retry to reopen existing storage.",
           ),
         ),
