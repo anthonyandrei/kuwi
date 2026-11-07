@@ -1,3 +1,14 @@
+export type Account = {
+  id: string;
+  name: string;
+  type: "debit" | "assets" | "credit";
+  currency_code: string;
+  credit_limit_minor: number | null;
+  balance_minor: number;
+  has_activity: number;
+  decimal_places: number;
+};
+
 export type Setup = {
   preferred_name: string;
   preferred_currency: string;
@@ -5,7 +16,9 @@ export type Setup = {
   account_name: string;
   currency_code: string;
   opening_balance_minor: number;
+  accounts: Account[];
 };
+
 export type ExpenseCategory = { id: string; label: string };
 export type ExpenseRecord = {
   id: string;
@@ -18,8 +31,8 @@ export type ExpenseRecord = {
   note: string | null;
   created_at: string;
 };
-export type Ledger = {
-  account: Setup & { balance_minor: number; decimal_places: number };
+export type ExpenseLedger = {
+  account: Account;
   categories: ExpenseCategory[];
   expenses: ExpenseRecord[];
 };
@@ -31,18 +44,31 @@ export type CreateExpenseInput = {
   date: string;
   note?: string;
 };
-export type CreateExpenseResult = { ledger: Ledger; replayed: boolean };
+export type CreateExpenseResult = { ledger: ExpenseLedger; replayed: boolean };
+
+export type DatabaseResult =
+  | Setup
+  | Account[]
+  | Account
+  | ExpenseLedger
+  | CreateExpenseResult
+  | null;
+
 let worker: Worker | undefined;
 let sequence = 0;
 const pending = new Map<
   number,
   {
-    resolve: (value: unknown) => void;
+    resolve: (value: DatabaseResult) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }
 >();
-/** Terminate the owned worker and reject every unfinished call, clearing its timer. */
+
+/**
+ * Stop the current worker and reject every pending request with the supplied error.
+ * @param error - Failure to report to all calls waiting on this worker.
+ */
 function stopWorker(error: Error) {
   worker?.terminate();
   worker = undefined;
@@ -52,16 +78,17 @@ function stopWorker(error: Error) {
   }
   pending.clear();
 }
+
 /**
- * Send a serialized storage operation. Reject with the worker's storage or validation error.
- * @param command - Internal state, complete, or close operation.
- * @param args - Completion fields when saving setup; omitted for reads and close.
- * @returns Saved setup, or null before setup and after close.
- * A missing reply terminates the worker after 15 seconds for saves or 60 seconds otherwise.
- * The module owns the worker; callers surface failures. Timed-out calls retry with a fresh worker.
+ * Send one serialized database command and surface worker failures to the caller.
+ * Writes time out after 15 seconds so the UI can offer the same operation ID for retry;
+ * reads wait up to 60 seconds for OPFS initialization.
+ * @param command - A supported worker command.
+ * @param args - Command-specific values passed to the dedicated worker.
+ * @returns The command result, or a rejected promise when the worker reports or encounters an error.
  */
-export function database<T = Setup | null>(
-  command: string,
+export function database<T extends DatabaseResult = DatabaseResult>(
+  command: "state" | "accounts" | "account.create" | "account.update" | "complete" | "ledger" | "createExpense" | "close",
   args: object = {},
 ): Promise<T> {
   if (!worker) {
@@ -74,34 +101,34 @@ export function database<T = Setup | null>(
       else call?.resolve(data.result);
     };
     worker.onerror = () =>
-      stopWorker(
-        Error("Database worker failed. Retry to reopen existing storage."),
-      );
+      stopWorker(Error("Database worker failed. Retry to reopen existing storage."));
   }
-  return new Promise<T>((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const id = ++sequence;
+    const isWrite = command === "complete" || command === "createExpense" || command.startsWith("account.");
     const timer = setTimeout(
       () =>
         stopWorker(
           Error(
-            command === "complete"
-              ? "Save confirmation timed out. Retry saving to check whether your setup was saved."
-              : command === "createExpense"
+            isWrite
+              ? command === "createExpense"
                 ? "Save confirmation timed out. Retry to check whether your expense was saved."
+                : "Save confirmation timed out. Retry the account change to check whether it was saved."
               : "Opening local storage timed out. Retry to reopen existing storage.",
           ),
         ),
-      command === "complete" || command === "createExpense" ? 15000 : 60000,
+      isWrite ? 15000 : 60000,
     );
-    pending.set(id, {
-      resolve: (value) => resolve(value as T),
-      reject,
-      timer,
-    });
+    pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
     worker!.postMessage({ id, command, args });
   });
 }
-/** Close files and release ownership before allowing a new worker to retry startup. */
+
+/**
+ * Close the database before releasing ownership for another tab.
+ * Any call still waiting when the worker stops rejects with a close error.
+ * @returns A promise that resolves after the worker releases database ownership.
+ */
 export async function closeDatabase() {
   if (worker) {
     try {

@@ -13,8 +13,8 @@ const test = base.extend({
       const source = bytes.toString();
       if (storageFault.current === "write")
         return source.replace(
-          /db\.exec\(\{\s*sql: "INSERT INTO accounts/,
-          'throw Error("Simulated write failure"); db.exec({sql: "INSERT INTO accounts',
+          /db\.exec\(\{\s*sql: "INSERT INTO accounts VALUES\([^)]+debit[^)]*\)"/,
+          "throw Error(\"Simulated write failure\"); db.exec({sql: \"INSERT INTO accounts VALUES(?,?, 'debit', ?, NULL, ?)\"",
         );
       if (storageFault.current === "expense-write")
         return source.replace(
@@ -38,8 +38,8 @@ const test = base.extend({
         );
       if (storageFault.current === "interrupt")
         return source.replace(
-          /db\.exec\(\{\s*sql: "INSERT INTO accounts/,
-          'while(true) {} db.exec({sql: "INSERT INTO accounts',
+          /db\.exec\(\{\s*sql: "INSERT INTO accounts VALUES\([^)]+debit[^)]*\)"/,
+          "while(true) {} db.exec({sql: \"INSERT INTO accounts VALUES(?,?, 'debit', ?, NULL, ?)\"",
         );
       if (storageFault.current === "reply") {
         storageFault.current = null;
@@ -48,20 +48,20 @@ const test = base.extend({
           "if(command!=='complete') self.postMessage({id,result});",
         );
       }
-      if (storageFault.current === "downgrade-v1")
+      if (storageFault.current === "downgrade-v2")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testDowngradeV1") { transaction(() => db.exec("DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE categories; PRAGMA user_version=1;")); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testDowngradeV2") { transaction(() => db.exec("DROP TABLE pending_sync_operations; DROP TABLE expenses; DROP TABLE categories; PRAGMA user_version=2;")); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "account-rename")
         return source.replace(
           'else throw Error("Unknown database operation.");',
-          'else if (command === "testRenameAccount") { transaction(() => db.exec({ sql: "UPDATE accounts SET name=? WHERE id=?", bind: [args.name, args.accountId] })); result = true; } else throw Error("Unknown database operation.");',
+          'else if (command === "testRenameAccount") { transaction(() => db.exec({ sql: "UPDATE accounts SET name=? WHERE id=(SELECT first_account_id FROM setup WHERE id=1)", bind: [args.name] })); result = true; } else throw Error("Unknown database operation.");',
         );
       if (storageFault.current === "migration")
         return source.replace(
-          "            if (version < 2)",
-          '            if (version < 2 && !globalThis.__migrationFailed) { globalThis.__migrationFailed = true; transaction(() => { db.exec("CREATE TABLE migration_trial(id INTEGER PRIMARY KEY)"); throw Error("Simulated migration failure"); }); }\n            if (version < 2)',
+          "function migrateExpenses() {",
+          'function migrateExpenses() { if (!globalThis.__migrationFailed) { globalThis.__migrationFailed = true; transaction(() => { db.exec("CREATE TABLE migration_trial(id INTEGER PRIMARY KEY)"); throw Error("Simulated migration failure"); }); }',
         );
       throw Error("Unknown test fault");
     });
@@ -241,6 +241,47 @@ test("lost save reply exposes retry and returns the committed setup", async ({
   await expect(page.getByText("₱1,234.56", { exact: true })).toBeVisible();
 });
 
+test("setup retry rejects the same operation ID with different details", async ({
+  page,
+}) => {
+  await setup(page);
+  await page.getByLabel("Opening balance (PHP)", { exact: true }).fill("25");
+  await page.getByRole("button", { name: "Save my account", exact: true }).click();
+  await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Close database", exact: true }).click();
+  await expect(page.getByText("Database closed", { exact: true })).toBeVisible();
+
+  const response = await page.evaluate(() => new Promise((resolve) => {
+    const worker = new Worker("/db-worker.js", { type: "module" });
+    let commandResult;
+    worker.onmessage = ({ data }) => {
+      if (data.id === 1) {
+        commandResult = data;
+        worker.postMessage({ id: 2, command: "close" });
+      } else if (data.id === 2) {
+        worker.terminate();
+        resolve(commandResult);
+      }
+    };
+    worker.postMessage({
+      id: 1,
+      command: "complete",
+      args: {
+        name: "Different name",
+        account: "Cash",
+        currency: "PHP",
+        amountMinor: 2500,
+        operationId: "setup:first",
+      },
+    });
+  }));
+
+  expect(response.error).toContain("already used for different account details");
+  await page.getByRole("button", { name: "Retry opening", exact: true }).click();
+  await expect(page.getByText("Welcome, Anthony.", { exact: true })).toBeVisible();
+  await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
+});
+
 test("saved setup reopens offline after full browser closure", async ({
   browserName,
   baseURL,
@@ -307,17 +348,18 @@ async function runWorkerCommand(page, command, args = {}) {
   );
 }
 
-test("failed version-two migration preserves a version-one account and can reopen", async ({
+test("failed version-three migration preserves a version-two account and can reopen", async ({
   page,
   storageFault,
 }) => {
   storageFault.disableCache = true;
-  storageFault.current = "downgrade-v1";
+  storageFault.current = "downgrade-v2";
   await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
   await page
     .getByRole("button", { name: "Close database", exact: true })
     .click();
-  await runWorkerCommand(page, "testDowngradeV1");
+  await runWorkerCommand(page, "testDowngradeV2");
   storageFault.current = "migration";
   await page.reload();
   await expect(page.getByRole("alert")).toContainText(
@@ -329,6 +371,7 @@ test("failed version-two migration preserves a version-one account and can reope
     page.getByText("Welcome, Anthony.", { exact: true }),
   ).toBeVisible();
   await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
   await page.getByRole("button", { name: "Add expense", exact: true }).click();
   await page.getByLabel("Expense amount", { exact: true }).fill("1");
   await page.getByLabel("Expense note", { exact: true }).fill("Migrated data");
@@ -350,15 +393,14 @@ test("renaming an account leaves linked expense history and balance intact", asy
   await page.getByRole("button", { name: "Save expense", exact: true }).click();
   await expect(page.getByText("₱990.00", { exact: true })).toBeVisible();
 
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
   await page.getByRole("button", { name: "Close database", exact: true }).click();
-  await runWorkerCommand(page, "testRenameAccount", {
-    accountId: "first",
-    name: "Everyday",
-  });
+  await runWorkerCommand(page, "testRenameAccount", { name: "Everyday" });
   storageFault.current = null;
   await page.reload();
   await expect(page.getByText("Everyday", { exact: true })).toBeVisible();
   await expect(page.getByText("₱990.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Everyday", exact: true }).click();
   await page.getByRole("button", { name: "Transaction history", exact: true }).click();
   await expect(page.getByText("Coffee", { exact: true })).toBeVisible();
   await expect(page.getByText(/Food · .* · Everyday/)).toBeVisible();
@@ -371,6 +413,7 @@ async function fundedSetup(page) {
   await page.getByLabel("Opening balance (PHP)", { exact: true }).fill("1000");
   await page.getByRole("button", { name: "Save my account", exact: true }).click();
   await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
 }
 
 test("expense journey saves history and derives the offline account balance", async ({
@@ -411,6 +454,7 @@ test("JPY expense rounding uses whole yen in history and the derived balance", a
   await page.getByRole("button", { name: "Save my account", exact: true }).click();
   await expect(page.getByText(/(?:JP)?¥1,000/)).toBeVisible();
 
+  await page.getByRole("button", { name: "View account Cash", exact: true }).click();
   await page.getByRole("button", { name: "Add expense", exact: true }).click();
   await page.getByLabel("Expense amount", { exact: true }).fill("12.5");
   await page.getByLabel("Expense note", { exact: true }).fill("Train");
@@ -418,6 +462,30 @@ test("JPY expense rounding uses whole yen in history and the derived balance", a
   await expect(page.getByText(/(?:JP)?¥987/)).toBeVisible();
   await page.getByRole("button", { name: "Transaction history", exact: true }).click();
   await expect(page.getByText(/(?:JP)?¥13/)).toBeVisible();
+});
+
+test("an expense increases the amount owed on a credit account", async ({
+  page,
+}) => {
+  await setup(page);
+  await page.getByRole("button", { name: "Save my account", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("Credit card");
+  await page.getByRole("radio", { name: "Credit", exact: true }).click();
+  await page.getByLabel("Credit limit (PHP)", { exact: true }).fill("50000");
+  await page.getByRole("button", { name: "Add current balance", exact: true }).click();
+  await page.getByLabel("Current balance (PHP)", { exact: true }).fill("100");
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+  await page.getByRole("button", { name: "View account Credit card", exact: true }).click();
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("25");
+  await page.getByLabel("Expense note", { exact: true }).fill("Card purchase");
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+  await expect(page.getByText("₱125.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+  await expect(page.getByText("Card purchase", { exact: true })).toBeVisible();
+  await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
 });
 
 test("expense validation rejects zero and dates after today", async ({ page }) => {
@@ -574,6 +642,7 @@ test("expense records survive full offline browser closure and allow another wri
     page = await context.newPage();
     await page.goto("/");
     await expect(page.getByText("₱987.65", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View account Cash", exact: true }).click();
     await page.getByRole("button", { name: "Add expense", exact: true }).click();
     await page.getByLabel("Expense amount", { exact: true }).fill("2.35");
     await page.getByLabel("Expense note", { exact: true }).fill("Water");

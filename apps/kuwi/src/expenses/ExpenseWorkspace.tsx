@@ -9,7 +9,7 @@ import {
 } from "react-native";
 import { saveExpense } from "./commands";
 import { getLocalDate, parseExpenseAmount, validateExpenseDate } from "./entry";
-import type { Ledger } from "../storage/client";
+import type { ExpenseLedger } from "../storage/client";
 
 const ink = "#293c32";
 const sage = "#486b51";
@@ -32,9 +32,9 @@ export function ExpenseWorkspace({
   onLedgerChange,
 }: {
   mode: "expense" | "history";
-  ledger: Ledger;
+  ledger: ExpenseLedger;
   onBack: () => void;
-  onLedgerChange: (next: Ledger) => void;
+  onLedgerChange: (next: ExpenseLedger) => void;
 }) {
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
@@ -59,7 +59,7 @@ export function ExpenseWorkspace({
     try {
       const result = await saveExpense({
         operationId: operationId.current,
-        accountId: account.account_id,
+        accountId: account.id,
         categoryId,
         amountMinor,
         date,
@@ -103,7 +103,7 @@ export function ExpenseWorkspace({
                     {expense.note || expense.category_label}
                   </Text>
                   <Text style={styles.meta}>
-                    {expense.category_label} · {expense.date} · {account.account_name}
+                    {expense.category_label} · {expense.date} · {account.name}
                   </Text>
                 </View>
                 <Text style={styles.entryAmount}>
@@ -126,7 +126,7 @@ export function ExpenseWorkspace({
         <Text style={styles.backText}>Back to account</Text>
       </Pressable>
       <Text style={styles.title}>Add an expense</Text>
-      <Text style={styles.copy}>Record money spent from {account.account_name}.</Text>
+      <Text style={styles.copy}>Record money spent from {account.name}.</Text>
       <View style={styles.balanceSummary}>
         <Text style={styles.label}>Current balance</Text>
         <Text style={styles.balance}>
