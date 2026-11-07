@@ -1,12 +1,38 @@
-import { expect, test as base, webkit } from "@playwright/test";
+import { chromium, expect, test as base, webkit } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { startServer } from "../scripts/serve.mjs";
+
+const populatedV1 = readFileSync(
+  new URL("./fixtures/populated-v1.sql", import.meta.url),
+  "utf8",
+);
+const legacyV1Shell = readFileSync(
+  new URL("./fixtures/legacy-v1.html", import.meta.url),
+);
+const legacyV1Worker = readFileSync(
+  new URL("./fixtures/legacy-v1-worker.js", import.meta.url),
+);
+const legacyV3Shell = readFileSync(
+  new URL("./fixtures/legacy-v3.html", import.meta.url),
+);
+const legacyV3Worker = readFileSync(
+  new URL("./fixtures/legacy-v3-worker.js", import.meta.url),
+);
 
 const test = base.extend({
   storageFault: async ({}, provide) => {
-    await provide({ current: null });
+    await provide({ current: null, legacyBuild: false });
   },
   baseURL: async ({ storageFault }, provide) => {
     const server = startServer(0, (path, bytes) => {
+      if (path === "/" && storageFault.legacyBuild === "v3")
+        return legacyV3Shell;
+      if (path === "/db-worker.js" && storageFault.legacyBuild === "v3")
+        return legacyV3Worker;
+      if (path === "/" && storageFault.legacyBuild)
+        return legacyV1Shell;
+      if (path === "/db-worker.js" && storageFault.legacyBuild)
+        return legacyV1Worker;
       if (path !== "/db-worker.js" || !storageFault.current) return bytes;
       const source = bytes.toString();
       if (storageFault.current === "accountReply") {
@@ -29,18 +55,13 @@ const test = base.extend({
         let result = source.replace(
           'const version = db.selectValue("PRAGMA user_version");',
           `const originalVersion=db.selectValue("PRAGMA user_version");
-          if(originalVersion===0){db.exec(\`CREATE TABLE currencies(code TEXT PRIMARY KEY NOT NULL, decimal_places INTEGER NOT NULL CHECK(decimal_places BETWEEN 0 AND 3)) STRICT;
-          INSERT INTO currencies VALUES('PHP',2),('USD',2),('EUR',2),('GBP',2),('JPY',0),('TWD',2);
-          CREATE TABLE profiles(id TEXT PRIMARY KEY NOT NULL, preferred_name TEXT NOT NULL CHECK(length(trim(preferred_name))>0), preferred_currency TEXT NOT NULL REFERENCES currencies(code)) STRICT;
-          CREATE TABLE accounts(id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL CHECK(length(trim(name))>0), currency_code TEXT NOT NULL REFERENCES currencies(code), opening_balance_minor INTEGER NOT NULL) STRICT;
-          CREATE TABLE setup(id INTEGER PRIMARY KEY CHECK(id=1), profile_id TEXT NOT NULL UNIQUE REFERENCES profiles(id), first_account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id), completed_at TEXT NOT NULL) STRICT;
-          INSERT INTO profiles VALUES('local','Anthony','PHP'); INSERT INTO accounts VALUES('first','Cash','PHP',123456); INSERT INTO setup VALUES(1,'local','first','2026-11-07T00:00:00.000Z'); PRAGMA user_version=1;\`);}
+          if(originalVersion===0){db.exec(${JSON.stringify(populatedV1)});}
           const version = db.selectValue("PRAGMA user_version");`,
         );
         if (failMigration)
           result = result.replace(
-            "migrateV1();",
-            "transaction(() => { db.exec('CREATE TABLE migration_trial(id INTEGER)'); throw Error('Simulated migration failure'); });",
+            '      PRAGMA user_version=2;\n    `);\n  });\n}\n\n/** Add ordinary expenses',
+            '      PRAGMA user_version=2;\n    `);\n    if (!self.__legacyMigrationFailed) { self.__legacyMigrationFailed = true; throw Error("Simulated migration failure"); }\n  });\n}\n\n/** Add ordinary expenses',
           );
         return result;
       }
@@ -77,6 +98,135 @@ async function finishSetup(page, { name = "Anthony", currency = "PHP" } = {}) {
   await page.getByRole("button", { name: "Save my account" }).click();
   await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
 }
+
+test("a populated legacy build updates on the same origin and reopens offline", async ({
+  browserName,
+  baseURL,
+  storageFault,
+}, testInfo) => {
+  const browserType = browserName === "webkit" ? webkit : chromium;
+  const context = await browserType.launchPersistentContext(
+    testInfo.outputPath("legacy-update-profile"),
+    { baseURL },
+  );
+  try {
+    const page = await context.newPage();
+    storageFault.legacyBuild = true;
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Kuwi legacy build" })).toBeVisible();
+    await page.getByRole("button", { name: "Save my account" }).click();
+    await expect(page.getByRole("status")).toContainText("Welcome, Anthony.");
+    await expect(page.getByRole("status")).toContainText("Cash: ₱1234.56");
+    await page.getByRole("button", { name: "Close database" }).click();
+    await expect(page.getByRole("status")).toHaveText("Database closed");
+
+    storageFault.legacyBuild = false;
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
+    await expect(page.getByText("Welcome, Anthony.", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱1,234.56", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View account Cash" }).click();
+    await page.getByRole("button", { name: "Add expense" }).click();
+    await page.getByLabel("Expense amount").fill("10");
+    await page.getByLabel("Expense note").fill("After legacy update");
+    await page.getByRole("button", { name: "Save expense" }).click();
+    await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Transaction history" }).click();
+    await expect(page.getByText("After legacy update", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Back to account" }).click();
+    await page.getByRole("button", { name: "Back to accounts" }).click();
+    await page.evaluate(async () => navigator.serviceWorker.ready);
+    await page.getByRole("button", { name: "Close database" }).click();
+    await context.setOffline(true);
+    await page.getByRole("button", { name: "Retry opening" }).click();
+    await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View account Cash" }).click();
+    await page.getByRole("button", { name: "Add expense" }).click();
+    await page.getByLabel("Expense amount").fill("1");
+    await page.getByLabel("Expense note").fill("Offline after legacy update");
+    await page.getByRole("button", { name: "Save expense" }).click();
+    await expect(page.getByText("₱1,223.56", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Transaction history" }).click();
+    await expect(page.getByText("After legacy update", { exact: true })).toBeVisible();
+    await expect(page.getByText("Offline after legacy update", { exact: true })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("a legacy expense and backup survive the shell update", async ({
+  browserName,
+  baseURL,
+  storageFault,
+}, testInfo) => {
+  const browserType = browserName === "webkit" ? webkit : chromium;
+  const context = await browserType.launchPersistentContext(
+    testInfo.outputPath("legacy-expense-update-profile"),
+    { baseURL },
+  );
+  try {
+    const page = await context.newPage();
+    storageFault.legacyBuild = "v3";
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Kuwi previous shell" })).toBeVisible();
+    await page.getByRole("button", { name: "Save my account" }).click();
+    await expect(page.getByRole("status")).toContainText("Cash: ₱1234.56");
+    await page.getByRole("button", { name: "Add expense" }).click();
+    await expect(page.getByRole("status")).toHaveText("Legacy balance: ₱1224.56");
+
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export backup" }).click();
+    const download = await downloadPromise;
+    const backup = readFileSync(await download.path());
+    expect(JSON.parse(backup.toString())).toMatchObject({
+      format: "kuwi.backup",
+      schemaVersion: 3,
+      data: {
+        accounts: [expect.objectContaining({ name: "Cash" })],
+        expenses: [expect.objectContaining({ note: "Legacy coffee", amount_minor: 1000 })],
+      },
+    });
+    await page.getByRole("button", { name: "Close database" }).click();
+    await expect(page.getByRole("status")).toHaveText("Database closed");
+
+    storageFault.legacyBuild = false;
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
+    await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View account Cash" }).click();
+    await page.getByRole("button", { name: "Transaction history" }).click();
+    await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to account" }).click();
+    await page.getByRole("button", { name: "Back to accounts" }).click();
+
+    const chooserPromise = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "Restore backup" }).click();
+    const chooser = await chooserPromise;
+    await chooser.setFiles({
+      name: "legacy-backup.json",
+      mimeType: "application/json",
+      buffer: backup,
+    });
+    await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View account Cash" }).click();
+    await page.getByRole("button", { name: "Transaction history" }).click();
+    await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to account" }).click();
+    await page.getByRole("button", { name: "Back to accounts" }).click();
+
+    await page.evaluate(async () => navigator.serviceWorker.ready);
+    await page.getByRole("button", { name: "Close database" }).click();
+    await context.setOffline(true);
+    await page.getByRole("button", { name: "Retry opening" }).click();
+    await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View account Cash" }).click();
+    await page.getByRole("button", { name: "Transaction history" }).click();
+    await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
 
 test("accounts can be added and renamed, with linked balances retained offline", async ({
   page,
@@ -184,6 +334,7 @@ test("failed account edits roll back and retry the same save", async ({
 test("migrates a populated v1 database into derived account balances", async ({
   page,
   storageFault,
+  context,
 }) => {
   storageFault.current = "migrateV1";
   await page.goto("/");
@@ -203,6 +354,27 @@ test("migrates a populated v1 database into derived account balances", async ({
   await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Transaction history" }).click();
   await expect(page.getByText("After v1 migration", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Back to account" }).click();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
+  await page.evaluate(async () => navigator.serviceWorker.ready);
+  const second = await context.newPage();
+  await second.goto("/");
+  await expect(second.getByRole("alert")).toContainText("Database busy");
+  await page.getByRole("button", { name: "Close database" }).click();
+  await context.setOffline(true);
+  await second.getByRole("button", { name: "Retry opening" }).click();
+  await expect(second.getByText("Migrated cash", { exact: true })).toBeVisible();
+  await expect(second.getByText("₱1,224.56", { exact: true })).toBeVisible();
+  await second.getByRole("button", { name: "View account Migrated cash" }).click();
+  await second.getByRole("button", { name: "Transaction history" }).click();
+  await expect(second.getByText("After v1 migration", { exact: true })).toBeVisible();
+  await second.getByRole("button", { name: "Back to account" }).click();
+  await second.getByRole("button", { name: "Add expense" }).click();
+  await second.getByLabel("Expense amount").fill("1");
+  await second.getByLabel("Expense note").fill("Offline after migration");
+  await second.getByRole("button", { name: "Save expense" }).click();
+  await expect(second.getByText("₱1,223.56", { exact: true })).toBeVisible();
 });
 
 test("a failed v1 migration keeps the populated database for a successful retry", async ({
@@ -212,6 +384,7 @@ test("a failed v1 migration keeps the populated database for a successful retry"
   storageFault.current = "failV1Migration";
   await page.goto("/");
   await expect(page.getByRole("alert")).toContainText("Simulated migration failure");
+  await expect(page.getByRole("button", { name: "Retry opening" })).toBeVisible();
   await page.getByRole("button", { name: "Retry opening" }).click();
   await expect(page.getByText("₱1,234.56", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Edit account Cash" }).click();

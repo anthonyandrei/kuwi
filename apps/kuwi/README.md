@@ -34,6 +34,16 @@ write/migration failures, interrupt an active transaction, or lose a save reply.
 the exported production app. The tests assert visible setup, balances,
 rollback/retry, ownership handoff, and offline reopening after browser closure.
 
+Upgrade journeys serve prior product shells and workers first, then switch the
+same origin to the current app. The setup-era v1 build checks schema migration,
+worker ownership handoff, retained balance and history, and an offline write.
+The populated v3 build carries an expense and an exported backup through the
+shell update, restores that backup, then reopens offline. A separate v1
+migration failure injects an error after the migration statements run, so the
+transaction must restore the old schema before a retry. The quota journey
+checks the visible error and confirms that the saved account remains available
+after retry.
+
 Backup export downloads the versioned JSON contract described in
 [`finance-storage.md`](../../docs/finance-storage.md#product-backup-contract).
 Restore uses the browser's file picker and validates contents regardless of the
