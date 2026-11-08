@@ -58,8 +58,9 @@ file extension or reported MIME type. Candidate data is checked before an
 atomic replacement; failure leaves the existing local ledger available. The
 Chromium and disk-backed WebKit journeys cover real downloads, file selection,
 rejected candidates, valid round trips, rollback after replacement begins, and
-offline reopen followed by another write. Export and restore through Files in
-the installed iPhone app still need physical-device acceptance.
+offline reopen followed by another write. In the simulator, the first restore
+attempt showed a blank picker. A later retry listed the exported JSON in Files
+and accepted it.
 
 The database uses product-specific OPFS paths and a Web Lock acquired before
 opening files. It never opens the probe's files. Startup preserves existing
@@ -83,14 +84,16 @@ has no Clerk or Convex dependency.
 
 The recovered planned-entry, budget, and transfer rules come from static Tarsi
 WEB code. Kuwi keeps future-dated entries planned across reopening and requires
-an explicit Log action. Tarsi iPhone 2.5.9 acceptance remains pending. Kuwi's
-budget screen covers built-in expense categories; custom and hidden categories,
-subcategory budgets, and Pro entitlements are outside the current app.
-Cross-currency progress stays unavailable because Kuwi has no exchange-quote
-source. Monthly budget cycles use a saved start day from 1 to 31, defaulting to
-day 1. Short months use their last day when the selected day does not exist.
-Physical iPhone acceptance for planned entries,
-transfers, budgets, and backup round trips remains pending.
+an explicit Log action. The native Tarsi iPhone 2.5.9 reference was unavailable
+for this work. Kuwi's budget screen covers built-in expense categories; custom
+and hidden categories, subcategory budgets, and Pro entitlements are outside
+the current app. Cross-currency progress stays unavailable because Kuwi has no
+exchange-quote source. Monthly budget cycles use a saved start day from 1 to 31,
+defaulting to day 1. Short months use their last day when the selected day does
+not exist.
+
+The iPhone simulator is the development acceptance target for planned entries,
+transfers, budgets, and backup round trips.
 
 The six observed currency tiles are PHP, USD, EUR, GBP, JPY, and TWD. PHP, Cash,
 and zero are the defaults. JPY uses whole units; the other enabled currencies
@@ -144,13 +147,13 @@ layouts, planned-entry logging and date rules, overdue edits and deletion,
 backup validation, retries and rollback, and offline reopening. Cross-currency
 checks preserve source and received minor-unit amounts, canonical decimal
 rates, transfer receipts, and budget definitions. The verified WEB rules for
-planned entries are accepted for this stage. Physical iPhone acceptance for
-planned entries, transfers, budgets, income, and Files backup export and restore
-remains pending.
+planned entries are accepted for this stage. The simulator finance checks below
+cover planned entries, transfers, budgets, income, and Files backup flows.
 
-Physical iPhone installation, offline reopening, and populated Safari ownership
-handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2
-(build 24B8117) completed the deployed Safari setup using the software keyboard.
+A prior physical iPhone run verified installation and offline reopening. A
+populated Safari ownership handoff also passed, as described below. The iPhone
+18 Pro simulator on iOS 27.2 (build 24B8117) completed the deployed Safari
+setup using the software keyboard.
 The name field remained visible, and the keyboard's Next key advanced to the
 introduction. Its page Next button sat under the keyboard accessory bar;
 keyboard Next or dismissal provided a working route forward. The currency list
@@ -162,9 +165,71 @@ Kuwi uses the observed sequence and defaults with its own cream/sage layout and
 quokka artwork. This verifies usable setup transitions, not identical Tarsi
 animation timing or artwork. Blank-name validation and non-PHP precision still
 come from the separate shipped-web evidence, not new native observations.
-Physical iPhone Files export and restore, income entry, and later finance
-journeys remain outstanding. Browser journeys do not establish installed-app
-picker or download behavior.
+The simulator finance checks below record income entry and Files behavior.
+Browser journeys do not establish installed-app picker or download behavior.
+
+### iPhone 18 Pro simulator finance acceptance on 2026-11-08
+
+On the booted iPhone 18 Pro simulator running iOS 27.2, Safari opened the
+local app at `http://127.0.0.1:4183/`. The test ledger began with Cash at
+NT$100,000 and USD wallet at US$5,000. Renaming Cash to Cash test and creating
+a Cash 2 debit account with a zero TWD opening balance both saved successfully.
+
+A Food expense dated 2026-11-12 remained planned and left the balance at
+NT$100,000. Logging it on 2026-11-08 reduced the balance by NT$1,200. Editing
+the entry to NT$1,300 updated the balance to NT$98,700; deleting it restored
+NT$100,000. A NT$5,000 income was changed to Salary at NT$5,500, appeared in
+history with the corrected category and amount, then was deleted. The balance
+returned to NT$100,000.
+
+A Food monthly budget of NT$5,000 for November showed NT$1,200 spent, 24%, and
+NT$3,800 remaining after a new NT$1,200 expense. A same-currency transfer of
+NT$1,000 from Cash test to Cash 2 saved, leaving NT$97,800 and NT$1,000 in the
+respective accounts. A TWD-to-USD transfer also saved with NT$1,000 sent,
+US$1,000 received, and a manually entered 1:1 exchange rate. This exercised
+the cross-currency flow; it did not check rate accuracy. The resulting account
+list showed Cash test at NT$96,800 and USD wallet at US$6,000.
+
+Safari downloaded `kuwi-backup-2026-11-08.kuwi.json`. The simulator Files app
+listed the JSON file at about 9 KB. The first Restore attempt opened a blank
+picker. On retry, Files showed the backup in Recents; selecting it returned to
+Kuwi. The account list showed Cash test at NT$96,800, USD wallet at US$6,000,
+and Cash 2 at NT$1,000 after the restore flow.
+
+A further iPhone restore attempt selected a 23-byte unsupported backup JSON
+(`{"not":"a Kuwi backup"}`) from Files. Kuwi returned to the account list,
+where Cash test remained at NT$96,800, USD wallet at US$6,000, and Cash 2 at
+NT$1,000. No visible rejection message appeared in the account or backup view,
+so invalid-backup failure feedback failed this simulator check.
+
+Adding Kuwi to the Home Screen with Open as Web App enabled succeeded. With the
+local server stopped, the app displayed its offline welcome screen and
+"Continue offline" opened setup. The welcome copy says Safari and the Home
+Screen app keep separate local data. Setup as QA with the default PHP Cash
+account at ₱0.00 succeeded. After force-closing Kuwi from the iOS app switcher
+and reopening it from Spotlight while the server was still stopped, the app
+showed a blank white screen during startup, then loaded Welcome, QA and Cash at
+₱0.00. This verifies that the Home Screen app reopened offline with its saved
+account.
+
+In Safari, numeric input worked after a field received focus, account
+navigation worked, and the page scrolled vertically. The keyboard covered
+lower form controls until the page was scrolled, and the Safari bar overlapped
+the form at its top scroll position. No motion-specific comparison was
+completed. The native Tarsi iPhone 2.5.9 reference was unavailable, so motion
+timing and parity remain unverified.
+
+A native Expo Release build also installed and launched in the simulator. It
+showed `Property 'Worker' doesn't exist` and an "Unable to open your data"
+screen. Native app acceptance is blocked because the database startup expects
+the browser Worker API.
+
+Simulator checks are the development acceptance target. Issues #1 and #3
+through #11 remain open with their statuses unchanged; a read-only GitHub
+review on 2026-11-08 confirmed their current state. `pnpm check` was not run
+per instruction, so the issue closure checklist remains incomplete. Anthony
+plans to try the deployed app and report any issues after deployment; that
+device feedback does not block development.
 
 ## Vercel verification on 2026-11-07
 
@@ -230,12 +295,12 @@ Save and reopen the account. Record the runtime/build, device, URL, and observed
 results against the issue criteria. Chromium/WebKit automation covers storage
 recovery and persistence but does not establish iOS keyboard behavior.
 
-Use a physical iPhone for Add to Home Screen installation and a full app closure
-followed by offline reopening from its icon. Preserve existing saved accounts.
-Try the available Mirroring controls before requesting user action; explain the
-specific check that requires the phone when a manual step remains necessary.
-Restore connectivity after an offline check. Simulator observations do not
-replace this physical installation evidence.
+Use the booted simulator for routine acceptance. When feasible, add Kuwi to the
+Home Screen and check keyboard input, navigation, layout, motion, close and
+reopen, offline use, and Files. Preserve existing saved accounts. If the
+simulator blocks a check, record it as unverified and continue development.
+Restore connectivity after an offline check. Device feedback after deployment
+is follow-up and does not block development.
 
 ## Checks after the session retro
 
