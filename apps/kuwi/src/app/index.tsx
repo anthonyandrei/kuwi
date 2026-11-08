@@ -14,10 +14,14 @@ import {
   closeDatabase,
   database,
   type Account,
-  type ExpenseLedger,
+  type TransactionLedger,
+  type ProductBackup,
+  type BudgetState,
   type Setup,
 } from "../storage/client";
-import { ExpenseWorkspace } from "../expenses/ExpenseWorkspace";
+import { TransactionWorkspace } from "../transactions/TransactionWorkspace";
+import { TransferWorkspace } from "../transfers/TransferWorkspace";
+import { BudgetWorkspace } from "../budgets/BudgetWorkspace";
 const currencies = [
   ["PHP", "Philippine Peso"],
   ["USD", "US Dollar"],
@@ -72,7 +76,7 @@ function formatMoney(amount: number, currency: string) {
 
 type AccountForm = { mode: "create" } | { mode: "edit"; account: Account };
 
-/** Render local setup and manage saved accounts; storage failures always stay visible. */
+/** Render local setup, account, transaction, transfer, budget, and backup workspaces. */
 export default function Home() {
   const [saved, setSaved] = useState<Setup | null>(null),
     [phase, setPhase] = useState("loading");
@@ -95,8 +99,12 @@ export default function Home() {
   const [creditOwedEnabled, setCreditOwedEnabled] = useState(false);
   const [operation, setOperation] = useState<{ key: string; id: string } | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
-  const [expenseLedger, setExpenseLedger] = useState<ExpenseLedger | null>(null);
-  const [expenseMode, setExpenseMode] = useState<"expense" | "history" | null>(null);
+  const [transactionLedger, setTransactionLedger] = useState<TransactionLedger | null>(null);
+  const [transactionMode, setTransactionMode] = useState<"expense" | "income" | "history" | null>(null);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [budgetState, setBudgetState] = useState<BudgetState | null>(null);
+  const [budgetOpen, setBudgetOpen] = useState(false);
+  const [backupMessage, setBackupMessage] = useState("");
   /**
    * Reopen the worker and read canonical setup, updating saved data and phase.
    * Resolves after startup succeeds or its failure is displayed; callers reset
@@ -216,16 +224,34 @@ export default function Home() {
       setSaving(false);
     }
   }
-  /** Open the expense form or account history with its canonical local ledger. */
-  async function openExpenseWorkspace(mode: "expense" | "history") {
+  /**
+   * Load the selected account's local ledger before opening an entry or history.
+   * @param mode - Workspace view to display after the ledger loads.
+   * @returns Resolves after opening the workspace or displaying a storage error.
+   * On storage failure, keeps the current screen open and shows the error.
+   */
+  async function openTransactionWorkspace(mode: "expense" | "income" | "history") {
     if (!selectedAccount) return;
     setError("");
     try {
-      const ledger = await database<ExpenseLedger>("ledger", {
+      const ledger = await database<TransactionLedger>("ledger", {
         accountId: selectedAccount.id,
       });
-      setExpenseLedger(ledger);
-      setExpenseMode(mode);
+      setTransactionLedger(ledger);
+      setTransactionMode(mode);
+    } catch (failure) {
+      setError((failure as Error).message);
+    }
+  }
+  /** Read canonical category budgets and derived progress before navigation.
+   * @returns Resolves after opening the budget view or displaying a storage error.
+   */
+  async function openBudgetWorkspace() {
+    setError("");
+    try {
+      const budgets = await database<BudgetState>("budgetState");
+      setBudgetState(budgets);
+      setBudgetOpen(true);
     } catch (failure) {
       setError((failure as Error).message);
     }
@@ -273,6 +299,74 @@ export default function Home() {
       setError((e as Error).message);
     }
   }
+  /** Download the complete v4 snapshot; report export errors in the visible page alert.
+   * @returns {Promise<void>} Resolves after the browser download is triggered.
+   */
+  async function exportBackup() {
+    setSaving(true);
+    setError("");
+    setBackupMessage("");
+    try {
+      const backup = await database<ProductBackup>("exportBackup");
+      const file = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `kuwi-backup-${new Date().toISOString().slice(0, 10)}.kuwi.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setBackupMessage("Backup downloaded.");
+    } catch (failure) {
+      setError(`Backup export failed: ${(failure as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+  /** Parse and restore one selected file, updating visible state only after commit.
+   * @param {File} file - User-selected backup contents; extension and MIME type are ignored.
+   * @returns {Promise<void>} Resolves after success or after a failure is shown to the user; restored budgets reopen from the committed backup.
+   */
+  async function restoreBackupFile(file: File) {
+    setSaving(true);
+    setError("");
+    setBackupMessage("");
+    try {
+      let backup: unknown;
+      try {
+        backup = JSON.parse(await file.text());
+      } catch {
+        throw Error("This file is not valid JSON. Choose a Kuwi backup file.");
+      }
+      const restored = await database<Setup | null>("restoreBackup", { backup });
+      setSaved(restored);
+      setSelectedAccount(null);
+      setTransactionLedger(null);
+      setTransactionMode(null);
+      setBudgetState(null);
+      setBudgetOpen(false);
+      setAccountForm(null);
+      setBackupMessage("Backup restored.");
+    } catch (failure) {
+      setError(`Backup restore failed: ${(failure as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+  /** Open the system file picker; `accept` is only a hint and content is validated after selection.
+   * @returns {void} Starts a restore after the user selects a file; cancellation leaves data unchanged.
+   */
+  function chooseBackupFile() {
+    const picker = document.createElement("input");
+    picker.type = "file";
+    picker.accept = ".json,.kuwi-backup,application/json";
+    picker.onchange = () => {
+      const file = picker.files?.[0];
+      if (file) void restoreBackupFile(file);
+    };
+    picker.click();
+  }
   /** Render a labeled action with a real disabled state during validation or saving. */
   const button = (label: string, onPress: () => void, disabled = false) => (
     <Pressable
@@ -294,6 +388,11 @@ export default function Home() {
         {error ? (
           <Text accessibilityRole="alert" style={s.error}>
             {error}
+          </Text>
+        ) : null}
+        {backupMessage ? (
+          <Text accessibilityRole="status" style={s.note}>
+            {backupMessage}
           </Text>
         ) : null}
         <Modal
@@ -372,19 +471,39 @@ export default function Home() {
         ) : saved ? (
           <View style={s.content}>
             <Text style={s.title}>Welcome, {saved.preferred_name}.</Text>
-            {expenseMode && expenseLedger ? (
-              <ExpenseWorkspace
-                mode={expenseMode}
-                ledger={expenseLedger}
-                onBack={() => setExpenseMode(null)}
+            {!transferOpen && !budgetOpen && !transactionMode && !accountForm
+              ? button("Budgets", () => void openBudgetWorkspace())
+              : null}
+            {budgetOpen && budgetState ? (
+              <BudgetWorkspace
+                initialState={budgetState}
+                onBack={() => setBudgetOpen(false)}
+                onStateChange={setBudgetState}
+              />
+            ) : transferOpen && selectedAccount ? (
+              <TransferWorkspace
+                accounts={saved.accounts}
+                initialAccount={selectedAccount}
+                onBack={() => setTransferOpen(false)}
+                onTransfer={(result) => {
+                  setSaved((current) => current ? { ...current, accounts: result.accounts } : current);
+                  setSelectedAccount(result.ledger.account);
+                  setTransactionLedger(result.ledger);
+                  setTransactionMode(null);
+                  setTransferOpen(false);
+                }}
+              />
+            ) : transactionMode && transactionLedger ? (
+              <TransactionWorkspace
+                mode={transactionMode}
+                ledger={transactionLedger}
+                onBack={() => setTransactionMode(null)}
                 onLedgerChange={(next) => {
-                  setExpenseLedger(next);
+                  setTransactionLedger(next);
                   setSelectedAccount(next.account);
                   setSaved((current) => current ? {
                     ...current,
-                    accounts: current.accounts.map((item) =>
-                      item.id === next.account.id ? next.account : item,
-                    ),
+                    accounts: next.accounts,
                   } : current);
                 }}
               />
@@ -520,8 +639,14 @@ export default function Home() {
                     Credit limit {formatMoney(selectedAccount.credit_limit_minor, selectedAccount.currency_code)}
                   </Text>
                 ) : null}
-                {button("Add expense", () => void openExpenseWorkspace("expense"))}
-                {button("Transaction history", () => void openExpenseWorkspace("history"))}
+                {button("Add expense", () => void openTransactionWorkspace("expense"))}
+                {selectedAccount.type !== "assets"
+                  ? button("Add income", () => void openTransactionWorkspace("income"))
+                  : null}
+                {selectedAccount.type !== "assets"
+                  ? button("Transfer between accounts", () => setTransferOpen(true))
+                  : null}
+                {button("Transaction history", () => void openTransactionWorkspace("history"))}
                 {button("Edit account details", () => editAccount(selectedAccount))}
                 {button("Back to accounts", () => setSelectedAccount(null))}
               </View>
@@ -560,6 +685,9 @@ export default function Home() {
                 ))}
                 {button("Add account", () => editAccount())}
                 <Text style={s.note}>Saved on this device. No sign-in required.</Text>
+                <Text style={s.note}>Restoring a backup replaces the data saved in this browser.</Text>
+                {button(saving ? "Exporting…" : "Export backup", () => void exportBackup(), saving)}
+                {button(saving ? "Working…" : "Restore backup", chooseBackupFile, saving)}
                 {button("Close database", () => void close())}
               </View>
             )}

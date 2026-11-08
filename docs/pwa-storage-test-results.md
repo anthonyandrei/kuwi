@@ -6,7 +6,7 @@ The disposable test uses `@sqlite.org/sqlite-wasm@3.54.1-build1`, pinned in the
 pnpm lockfile. Its runtime reports SQLite 3.54.1. The selected test adapter is
 OPFS SAHPool, with `clearOnInit=false` and `preserveOnInitFailure=true`. This is
 the adapter selected for the first Expo integration after the checks below.
-The full finance app still needs its own offline and update checks.
+Product app checks are recorded in the final section.
 
 ## Automated checks
 
@@ -124,7 +124,25 @@ ownership, explicit data-preservation settings, and atomic-write rules during
 integration. Keep the prototype's scratch data and fault controls out of the
 finance app.
 
-Repeat offline reopening, update recovery, ownership, and backup/restore checks
-on the integrated Expo app before relying on it for real finance data. These
-results do not establish permanent protection from storage eviction, device
-power-loss durability, or a cloud sync protocol.
+The product app's browser suite covers account and transaction storage, backup
+restore, and populated shell updates. These results do not establish permanent
+protection from storage eviction, device power-loss durability, or a cloud sync
+protocol.
+
+## Product app income checks
+
+Checked 2026-11-07 with
+`npm exec --yes --package=pnpm@11.25.0 -- pnpm check`. Lint, TypeScript,
+static build, and all 80 Playwright journeys passed: 40 each in Chromium and
+Playwright WebKit. Eight income persistence journeys run in both engines:
+income posting and history, PHP/JPY rounding, Credit debt reduction, a zero
+future planned entry, v3-to-v4 migration rollback with existing expense
+history, outbox rollback, lost-reply stable retry with changed-content rejection,
+and interrupted-write recovery. Backup coverage now round-trips income facts and
+their pending operations, imports v3 backups with empty income records, and
+checks rollback when a restore write fails. The offline closure journey reopens
+income and expense history and saves another income while offline.
+
+The shipped-web income form's physical iPhone acceptance is still pending.
+Playwright WebKit results do not establish physical Safari or Home Screen
+storage behavior.

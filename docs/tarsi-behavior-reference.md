@@ -169,12 +169,157 @@ resolution. Evidence is static and platform-specific. No runtime validation,
 native comparison, minimum historical date, or linked-effect rule beyond the
 eligible cashback path is claimed.
 
-Transfers reject nonpositive amounts, identical source/destination accounts,
-missing accounts, and failed eligibility checks. The action rounds source and
-received amounts in their respective currencies. A positive fee becomes a
-linked expense in the fees category. The returned state updates both account
-balances, the transfer, and the fee expense together. Exact eligibility,
-available-balance limits, and exchange-rate UI rules need further tracing.
+### Ordinary income entry
+
+Checked 2026-11-07 from the shipped web `add-income` chunk, Metro module 2617,
+and common-bundle modules 1685, 1701, 1709, and 1730. The chunk is
+`add-income-c54847041456330b5c6bb44f04331180.js`, 75,087 bytes, with SHA-256
+`4ae172ffa99f05be1a4a840b8a9368b0f9154656eb686b4b7091aa7c95d5520e`. The cached
+index maps `./add-income.tsx` to this chunk. The route map, full direct module
+dependency list, source artifact, and REA 6.8.0 Evidence are retained in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-income-20261107/`; the REA
+Evidence ID is `ev_c54dd834bd8afceaee3b0e5fb9a5e6d8d0c875acbe3618f3b48a0991a4f0bac3`.
+This is a completed static parse of one file, with 22,839 AST nodes, 234
+findings, and no parse failures. It does not establish runtime behavior or
+iPhone 2.5.9 parity.
+
+The ordinary form starts with today's local date, no selected category, and the
+profile's preferred currency. It requires an account and a nonnegative amount.
+The amount must be positive for a current or past one-time entry. A future
+one-time date becomes planned, does not post to the balance, and permits a zero
+amount. A note is trimmed and omitted when blank. The category is optional; an
+unset category is stored without a category ID. The form's account picker
+includes Debit and Credit accounts. It converts from the selected currency to
+the account currency when they differ, using the app's available or manual
+conversion rate.
+
+The built-in income categories are Salary (`salary`), Bonus (`bonus`),
+Freelance (`freelance`), Commission (`commission`), Business (`business`),
+Side Hustle (`side-hustle`), Allowance (`allowance`), Gift (`gift`), Refund
+(`refund`), Cashback (`cashback`), Interest (`interest`), Dividend
+(`dividend`), Rental (`rental`), and Other (`other`). The source also filters
+hidden categories and supports custom categories; those paths are outside this
+bounded Kuwi entry.
+
+For an eligible ordinary income, the store posts only when the date is today or
+earlier and the income is not planned. The balance helper adds income to Debit
+and Asset balances and subtracts it from the amount owed on Credit accounts.
+The inspected code does not establish an automatic posting process. The
+planned flag remains set through hydration, and the planned list labels due
+entries Overdue for explicit user action.
+The ordinary income form itself exposes Debit and Credit accounts. Its currency
+rounding helper uses the account currency: PHP 12.345 rounds to 12.35 and JPY
+12.5 rounds to 13. As a calculation example, PHP 1,000 plus a same-day income
+of 12.35 gives a Debit balance of 1,012.35; a Credit amount owed of 1,000
+becomes 987.65. The same entry dated tomorrow is planned and leaves either
+balance unchanged. These are calculations from the traced helpers, not
+observed runs of Tarsi.
+
+Kuwi's first income entry supports the selected account's currency. The source
+currency selector and cross-currency conversion flow need their own verified
+rate source and are not included. Recurring income, subcategories, custom or
+hidden categories, and native behavior are also outside this stage.
+
+### Same-currency transfer action
+
+Checked 2026-11-07 from common-bundle module 1731, with available-balance logic
+from module 1709, currency rounding from module 1701, and the state store in
+module 1685. The common bundle SHA-256 is
+`ccac38fefe6008c3988e03c933635bd4fcd1f19ae52b5179f623197bd7cda943`; selected
+module ranges and dependencies are recorded in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-focused-modules-20261107/provenance.json`.
+This is static web code inspection. It does not establish runtime behavior or
+iPhone 2.5.9 parity.
+
+The action rejects a nonpositive principal, identical account IDs, missing
+accounts, and failed eligibility or available-funds checks without changing
+the returned state. A Debit or Credit account may send; only a Debit account
+may receive. Assets accounts are excluded. The source and destination must
+have the same currency for Kuwi issue #8. Tarsi's broader action also accepts
+received amounts in another currency, which belongs to issue #9.
+
+The source must cover principal plus fee. Module 1709 defines available funds
+as the account balance for non-Credit accounts and `credit limit - amount owed`
+for Credit. The transfer action applies currency rounding before checking the
+sum. A positive fee becomes an expense on the source account in the `fees`
+category, with note `Bank transfer fee to <destination name>` and the same
+date and creation timestamp as the transfer. The action moves principal to the
+destination and records the principal, fee, and linked fee expense in one
+returned store update. It applies the movement immediately, including for a
+future date.
+
+Module 1701 uses two decimal places for PHP and zero for JPY. Its examples
+include PHP 12.345 rounding to 12.35 and JPY 12.5 rounding to 13. Kuwi's
+currently supported account currencies use two decimals except JPY. Kuwi's
+transfer form limits typed input to that precision and stores integer minor
+units.
+
+Worked examples from the traced helpers:
+
+| Source balance | Transfer | Fee | Result |
+| --- | ---: | ---: | --- |
+| PHP 1,500.00 Debit | PHP 200.00 | None | Source PHP 1,300.00; destination receives PHP 200.00. |
+| PHP 1,000.00 Debit | PHP 975.00 | PHP 25.00 | Source PHP 0.00; destination receives PHP 975.00; linked fee expense is PHP 25.00. |
+| PHP 1,024.99 Debit | PHP 1,000.00 | PHP 25.00 | Rejected because principal plus fee exceeds available balance by PHP 0.01. |
+| PHP 50.00 owed, PHP 150.00 credit limit | PHP 95.00 from Credit | PHP 5.00 | Available credit is PHP 100.00; result owes PHP 150.00 and the Debit destination receives PHP 95.00. |
+
+The cached index maps `./transfer.tsx` to
+`/_expo/static/js/web/transfer-2dbf20b142412a934fd581303887e2c8.js`, but that
+lazy chunk is absent from the local cache. The public JavaScript reader rejected
+the `application/javascript` response and the browser access host was
+unavailable. The action rules above are verified; exact transfer screen
+interactions and iPhone comparison remain open.
+
+## Category budgets
+
+Verified 2026-11-07 from the shipped Tarsi WEB category budget and category
+settings chunks, plus common-bundle store module 1685. The lazy chunks have
+SHA-256 hashes `3da233a7dd0b17d17533b5873eec71b13b325443bdcd80e68812e51b4baa5cbe`
+and `56c84f52a242daa1f72686877176cbd318730ce660be5747e700deaea4205842`;
+module 1685's source slice is `ad0c6f6bade6417009cc2fb4fa471def9d117b4dcfc1de13a1770896b42ef322`.
+This is static code evidence. It does not establish Tarsi iPhone 2.5.9
+behavior; physical acceptance remains pending.
+
+Tarsi exposes expense-category budgets. The Income tab does not create income
+budgets; percentage-of-income is a type of expense-category budget. Each
+category has a fixed or percentage limit and a daily, weekly, bi-weekly,
+monthly, or annual interval. New budgets default to fixed and monthly. Saving
+zero clears a budget. There is no global cap or account-specific budget.
+
+| Interval | Boundary rule |
+| --- | --- |
+| Daily | The reference date only. |
+| Weekly | Monday through Sunday. |
+| Bi-weekly | Repeat the saved inclusive start-to-end length from its anchor; new budgets use today through today plus 13 days. |
+| Monthly | Use the configured day, default 1, clamped to each month's last day. End the day before the next cycle starts. |
+| Annual | January 1 through December 31. |
+
+Budgets cover all accounts. Expense progress sums entries in the selected
+category and inclusive period when `affectsSpending` is not false and the entry
+is not planned. An explicit planned flag takes precedence; otherwise a future
+date without a recurring-expense ID is treated as planned. Percentage limits
+use actual income across accounts and categories in that same period; planned
+income is excluded. Edits and deletions affect progress because it is derived
+from the current ledger. Transfer principal is not passed to the budget helper.
+A transfer fee is a separate expense in Fees and counts once when eligible.
+Displayed progress is capped at 100%; remaining can be negative. The summary
+sums active category limits and spending, then caps aggregate progress at
+100%.
+
+Fixed budgets can roll unused allowance forward. Enabling rollover stores the
+current cycle start. Amount changes preserve that date; interval or bi-weekly
+anchor changes reset it. The effective allowance multiplies the configured
+amount by elapsed cycles. Spending accumulates from the stored start through
+today. Percentage budgets do not roll over.
+
+Budget values have no currency field. Tarsi interprets them in the profile's
+preferred currency and converts each eligible expense and income using its
+USD-base exchange quotes. It does not round converted amounts before summing.
+A missing required quote makes progress unavailable. Kuwi has no exchange
+quote source, so cross-currency progress is unavailable and no rate is
+invented. Kuwi currently implements built-in expense categories only; custom
+or hidden categories, subcategory budgets, and Pro entitlement rules remain
+outside this issue.
 
 ## Device persistence
 
@@ -246,11 +391,101 @@ currency route's supported list and native behavior still need verification.
 See [the account data model](account-data-model.md) for the bounded Kuwi
 behavior implemented from these findings.
 
+## Ordinary transaction edits and deletions
+
+Checked 2026-11-07 from the expense entry chunk (Metro module 2591), income
+entry chunk (module 2617), and store module 1685. The expense chunk is
+`add-expense-940caf825558b98d213bfca3fef5e6bd.js` with SHA-256
+`98677be132d94743c935cf788959c44ff21ffe3829226355dc21f7cdbdeb0c83`. The
+income chunk is `add-income-c54847041456330b5c6bb44f04331180.js` with SHA-256
+`4ae172ffa99f05be1a4a840b8a9368b0f9154656eb686b4b7091aa7c95d5520e`. The
+income route map and direct dependencies are in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-income-20261107/provenance.json`;
+the expense chunk provenance is in
+`/Users/drei/Library/Caches/kuwi-research/tarsi-web-lazy-20261107/provenance.json`.
+Both chunks depend on store module 1685. Currency rounding, balance effects,
+and category data come from modules 1701, 1709, 1728, and 1730. These are static
+web code traces. The target code was not executed, and iPhone 2.5.9 behavior is
+not established.
+
+The store's `updateExpense` path reverses the old posted effect on its original
+account, reverses linked cashback income, builds the replacement while keeping
+the expense ID and creation time, applies an eligible replacement effect, and
+reconciles recurring or installment state. `deleteExpense` reverses a posted effect and
+removes the expense. Its extra paths remove linked cashback income and
+installments; loan and installment relationships can block deletion. The
+ordinary expense entry UI also exposes an `expenseId` edit route and calls the
+store's update and delete methods.
+
+The store's `updateIncome` path reverses the old posted effect, builds the
+replacement with the same ID and creation time, posts an eligible replacement,
+and updates related goal, receipt, and recurring state. `deleteIncome` reverses
+the old posted effect, removes the income, clears cashback and receipt
+references, and reconciles recurring income. The ordinary income entry UI uses
+an `incomeId` edit route and calls these same store methods. These linked
+behaviors identify records that need coordinated changes in Tarsi. Kuwi's
+bounded one-time ledger has no cashback, receipt, goal, recurring, installment,
+or loan child records, so this implementation does not invent those
+relationships.
+
+Kuwi replaces an ordinary expense or income row in one SQLite transaction,
+preserving its transaction ID and creation time. The same transaction records a
+fingerprinted edit receipt. A delete removes the transaction and its create
+sync marker while adding a delete tombstone. Identical retries reuse their
+operation ID; reusing one with different content fails. Balances are derived
+from transaction rows, so replacing an account or amount changes the old and
+new account balances at the same commit. The UI permits account moves only
+between same-currency accounts and supports category, amount, date, and note
+replacement. Planned expenses and income remain out of balances and budget
+progress until the user chooses Log. Expense logging asks for confirmation;
+income logging asks for the actual positive amount. A future plan logs with
+today's local date, while a due or overdue plan keeps its scheduled date. The
+logged row retains its scheduled amount. Editing an overdue plan without
+logging leaves it planned; moving a still-future plan to today or earlier posts
+it, and moving a posted entry into the future makes it planned. Transfer
+editing is outside this ticket.
+
+For a derived expense calculation, begin with Debit accounts A = ₱1,000 and B =
+₱200. Posting a ₱12 expense to A gives A = ₱988. Editing it to ₱20 on B gives A
+= ₱1,000 and B = ₱180. Deleting it returns B to ₱200. For income, posting ₱25
+to A gives A = ₱1,025. Editing it to ₱35 on B returns A to ₱1,000 and gives B =
+₱235. Deleting it returns B to ₱200. These are arithmetic examples from the
+traced balance rules, not observed Tarsi runs.
+
+The edit/delete and planned-entry traces establish the shipped web store paths
+only. They do not confirm iPhone behavior, transfer corrections, or
+cross-currency replacement. Those remain explicit acceptance blockers.
+
+## Cross-currency transfers
+
+The recovered web transfer screen accepts a manual rate with direction `1
+source currency = rate destination currency`; it does not call a rate provider.
+The form can derive the received amount from a rate or derive the rate from a
+received amount. Source amount and fee use source-currency minor units, and the
+received amount uses destination-currency minor units. Rates parse to positive
+finite JavaScript numbers without a configured fractional-digit limit.
+
+The form truncates excess received-currency precision before submission. For
+example, USD 100 at 149.8765 JPY per USD becomes JPY 14,987 after truncating
+14,987.65 to JPY's zero decimal places. PHP 1,000 at 0.0184567 USD per PHP
+becomes USD 18.45. If the user enters USD 18.46 instead, the implied rate is
+0.01846. The store then rounds to the currency's minor unit; UI truncation
+happens first.
+
+A Debit or Credit account can send; only Debit can receive. The accounts must
+differ, and the source must have enough available funds for principal plus any
+source-currency fee. The destination has no funds check. Transfer balance
+effects apply immediately, including for future dates. The fee is a linked
+source-account expense. Chromium and disk-backed WebKit verify the issue #9
+web journeys. iPhone keyboard, formatting, and motion acceptance remains
+pending.
+
 ## Next evidence needed
 
 - Extend the observed iPhone first-run path with validation and currency edge cases.
-- Trace built-in categories, budget cycles, editing/deletion reversal, and
-  amount/currency edge cases before defining their acceptance criteria.
+- Compare budget cycles, eligible entries, and category behavior on iPhone.
+  Trace advanced linked transaction corrections and currency edge cases before
+  defining their acceptance criteria.
 - Trace cloud snapshot synchronization and observe conflicting edits before
   accepting a conflict policy.
 - Inventory the remaining screens, gestures, and mascot assets. No complete

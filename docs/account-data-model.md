@@ -1,6 +1,6 @@
 # Account data model
 
-Updated: 2026-11-07
+Updated: 2026-11-08
 
 This document records the local SQLite model and the account behavior currently
 implemented in `apps/kuwi`. It is the review point for later account and finance
@@ -32,39 +32,92 @@ characters and limits the fractional part to the currency precision, matching
 the recovered formatter behavior.
 
 Positive starting balances become initial adjustment rows. A zero opening
-balance has no adjustment row. When an account has an adjustment or expense,
-its starting balance and currency cannot be changed in the account editor; the
-name remains editable. Credit limit changes remain editable. Expenses reduce
-Debit and Assets balances and increase the amount owed on Credit accounts. The
-balance and activity flag are derived from the referenced adjustment and
-expense records.
+balance has no adjustment row. When an account has an adjustment, expense,
+income, or transfer, its starting balance and currency cannot be changed in the
+account editor; the name remains editable. Credit limit changes remain
+editable. Expenses reduce Debit and Assets balances and increase the amount
+owed on Credit accounts. Income adds to Debit and Assets balances and reduces
+the amount owed on Credit accounts. Kuwi currently accepts income on Debit and
+Credit accounts; the recovered income form does not offer Assets accounts.
 
 ## Relations and dependencies
 
 | Relation | Primary key | Stored facts and references |
 | --- | --- | --- |
 | `currencies` | `code` | `decimal_places` for each supported currency. |
-| `profiles` | `id` | `preferred_name`, `preferred_currency` → `currencies.code`. |
+| `profiles` | `id` | `preferred_name`, `preferred_currency` → `currencies.code`, monthly budget cycle start day from 1 through 31 (default 1). |
 | `accounts` | `id` | `name`, `type`, `currency_code` → `currencies.code`, optional `credit_limit_minor`, `created_at`. |
 | `account_adjustments` | `id` | `account_id` → `accounts.id`, signed `amount_minor`, `adjustment_type`, `created_at`. |
 | `setup` | `id` (fixed at 1) | `profile_id` → `profiles.id`, `first_account_id` → `accounts.id`, `completed_at`. |
 | `pending_operations` | `id` | `account_id` → `accounts.id`, `operation_type`, SHA-256 `request_fingerprint`, `created_at`. |
 | `categories` | `id` | Canonical label and display order for built-in expense categories. |
-| `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, positive minor units, date, optional note, `created_at`. |
-| `pending_sync_operations` | `operation_id` | `operation_id` → `expenses.id`; marks an expense creation for local sync. |
+| `expenses` | `id` | `account_id` → `accounts.id`, `category_id` → `categories.id`, optional `transfer_id` → `transfers.id`, positive minor units, date, optional note, planned flag, optional scheduled amount, `created_at`. |
+| `pending_sync_operations` | `operation_id` | `operation_id` → `expenses.id`; marks an expense creation for local sync and stores its original normalized request and submission date for retries. Migrated markers and linked transfer-fee markers can have a null receipt. |
+| `income_categories` | `id` | Canonical label and display order for built-in income categories. |
+| `incomes` | `id` | `account_id` → `accounts.id`, optional `category_id` → `income_categories.id`, nonnegative minor units, date, optional note, planned flag, optional scheduled amount, `created_at`. |
+| `pending_income_sync_operations` | `operation_id` | `operation_id` → `incomes.id`; marks an income creation for local sync and stores its original normalized request and submission date for retries. Migrated markers can have a null receipt. |
+| `transfers` | `id` | Account references, positive source principal and received amount in their respective minor units, canonical parsed rate, date, optional note, `created_at`. |
+| `expenses.transfer_id` | nullable foreign key | `transfer_id` → `transfers.id`; identifies the linked transfer-fee expense. The fee amount and category are stored on the expense. |
+| `pending_transfer_operations` | `operation_id` | `operation_id` → `transfers.id`, SHA-256 request fingerprint; marks the transfer for local sync and stable retries. |
+| `pending_transaction_operations` | `operation_id` | Transaction kind and ID, edit/delete/log type, request fingerprint, and creation time. Delete receipts retain IDs after their transaction row is removed. |
+| `budgets` | `category_id` | One normalized definition per expense category: fixed amount or percentage basis points, interval, optional rollover tracking, and optional bi-weekly anchor dates. |
+| `pending_budget_operations` | `operation_id` | Category ID, save/clear type, SHA-256 request fingerprint, and creation time for stable retries and future local sync. |
 
 The non-key dependencies are `code → decimal_places`, `profile id → preferred
-name, preferred currency`, `account id → name, type, currency, credit limit,
+name, preferred currency, monthly cycle start day`, `account id → name, type, currency, credit limit,
 creation time`, `adjustment id → account id, amount, kind, creation time`,
 `operation id → account id, operation type, request fingerprint, creation
-time`, `category id → label, display order`, and `expense id → account,
-category, amount, date, note, creation time`. `setup.id` identifies one profile
-and its first account.
+time`, `category id → label, display order`, `expense id → account, category,
+optional transfer reference, amount, date, note, planned state, scheduled amount,
+creation time`, and `income id → account, optional category, amount, date, note,
+planned state, scheduled amount, creation time`. Transaction operation IDs
+determine the kind, transaction ID, edit/delete/log type, fingerprint, and
+creation time. This relation has no foreign key because delete receipts must
+outlive their transaction rows. `setup.id` identifies one profile and its first
+account.
 
-Balances combine `account_adjustments` with posted expense effects; the app
-does not store another mutable balance on `accounts`. Account name and currency
-are stored once and referenced by ID from linked facts. Credit limits are
-account terms, while credit balances come from adjustment and expense facts.
+`transfer id → source account, destination account, source principal, received
+amount, exchange rate, date, note, and creation time`. Source and destination
+currencies and precision come from their account references. A fee is an
+expense in the `fees` category whose `transfer_id`
+points to the transfer. The transfer does not store a second fee amount. The
+backup contract exposes a derived fee amount for compatibility.
+
+The received amount is authoritative when the user enters it directly. Kuwi
+stores the implied canonical rate as a description of that manual amount; it
+does not require multiplying the rate back to reproduce the exact minor units.
+When the user enters a rate, Kuwi derives the received amount with decimal
+arithmetic and truncates it to destination precision.
+
+`budgets.category_id → amount_milli, type, percentage_basis_points, interval,
+rollover_enabled, rollover_started_at, biweekly_start_date, biweekly_end_date`.
+`pending_budget_operations.operation_id → category_id, operation_type,
+request_fingerprint, created_at`. A percentage budget stores its percentage in
+integer hundredths of one percent and a zero amount. A fixed budget stores an
+amount in thousandths of the preferred currency unit. Zero-save deletes the
+definition and records a clear receipt. Progress is derived from current
+expense and income rows; no spending total is stored in the budget relation.
+
+Backups include a derived `fee_amount_minor` field from the linked expense.
+
+Balances combine `account_adjustments`, posted expense and income effects, and
+transfer source and received amount effects; the app does not store another
+mutable balance on `accounts`. A debit source loses the transfer principal and any linked fee,
+while a debit destination receives the separate received amount. A credit
+source owes the principal and fee. Transfer fees use the source currency.
+Account name and currency are stored once and referenced by ID from linked
+facts. Credit limits are account terms, while credit balances come from
+adjustment and transaction facts.
+
+Budgets cover all accounts. The calculator selects ordinary expenses by
+category and inclusive period, then derives fixed or income-based limits and
+progress. Monthly periods use the profile's saved start day, defaulting to 1;
+days beyond a month's length clamp to that month's last day. Transfer principal
+lives only in `transfers` and is excluded. A positive transfer fee is the
+linked `fees` expense, so it contributes once. Percentage bases include actual
+incomes across accounts and categories, with planned income excluded. Choosing
+an FX quote source that supports offline progress remains a product decision.
+Until then, a qualifying entry in another currency makes progress unavailable.
 
 ## Write and retry contract
 
@@ -79,6 +132,23 @@ it with different content fails. The queue row keeps an account reference and a
 fixed-size content fingerprint rather than copying the account fields. Local
 storage remains usable without sign-in; cloud delivery is outside this stage.
 
+Expense and income edits keep the transaction ID and creation time, replace the
+account/category/amount/date/note fields, and write an edit receipt in one
+transaction. Delete removes the transaction and its create sync marker while
+writing a delete receipt in the same transaction. The receipt fingerprint
+supports stable retries and rejects an operation ID reused with different
+content. Balances are derived from the resulting rows, so a move between
+accounts updates both balances from one committed replacement. Account changes
+in this form require the same currency. Planned entries remain unposted through
+due dates and edits until the user chooses Log. Moving a future plan to today
+or earlier posts it; editing a due or overdue plan keeps it planned.
+
+Expense and income create receipts preserve the normalized request, planned
+intent, and local submission date. An unchanged retry keeps the original intent
+after the due date, logging, or correction, while reusing its ID with changed
+content fails. A legacy marker without a receipt is checked against its current
+transaction row.
+
 ## Migration
 
 Schema version 1 stored `opening_balance_minor` directly on `accounts`.
@@ -92,7 +162,22 @@ Version 3 adds categories, expenses, pending sync markers, and an account/date
 index. The expense migration runs in one transaction after the account
 migration and preserves version 2 data if it fails.
 
+Version 4 adds income categories, incomes, and pending income sync markers.
+Version 5 adds transaction edit/delete receipts. Version 6 adds transfers,
+linked fee references on expenses, and pending transfer operations. The two v7
+layouts reflect separate schema histories: one adds received-currency minor
+units and the canonical parsed exchange-rate string; the other adds normalized
+category budgets and pending budget operation receipts. Version 8 combines both
+layouts. Version 9 reconciles the two populated v8 shapes by adding only missing
+planned or transfer columns and widening old transaction receipts to accept
+`log`. Existing same-currency transfers receive
+equal source and received amounts and rate `1`; existing currency-aware values
+remain unchanged. Migrations run transactionally and preserve populated stores
+if a backfill fails. Version 10 adds the monthly cycle preference and nullable
+create-request receipts; existing sync markers retain null receipts. Transfer
+fees stay as linked expenses, and transfer principal remains a separate ledger
+fact.
+
 The adjustment table currently accepts initial balances only. Manual balance
-adjustments, account deletion, loan schedules, investments, income, transfers,
-backup data, and cloud-sync delivery need their own verified rules and schema
-changes before implementation.
+adjustments, account deletion, loan schedules, investments, and cloud-sync
+delivery need their own verified rules and schema changes before implementation.

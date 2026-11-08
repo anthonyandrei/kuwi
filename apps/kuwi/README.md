@@ -1,8 +1,12 @@
 # Kuwi product app
 
-Issue #2's local setup app is separate from the disposable storage probe.
-It uses Expo, React Native Web, Expo Router, Reanimated, and the supplied third
-quokka reference with cream and sage colors. Local use requires no sign-in.
+The local finance app is separate from the disposable storage probe. It uses
+Expo, React Native Web, Expo Router, Reanimated, and the supplied quokka
+reference with cream and sage colors. It supports local setup, accounts,
+expenses, income, planned entries, offline cross-currency transfers, category
+budgets, and versioned backup/restore. Transaction history supports editing and
+deleting entries, with an explicit Log action for planned expenses and income.
+Local use requires no sign-in.
 
 From the repository root:
 
@@ -28,11 +32,34 @@ After building, rerun the product journeys from the repository root with
 `pnpm test`. The server resolves its export relative to its script, so it also
 works when launched from the app directory.
 
-Tests use real OPFS, an independent loopback origin for each journey, and disk
-profiles for WebKit. A local test server can alter the served worker to inject
-write/migration failures, interrupt an active transaction, or lose a save reply. These controls are absent from
-the exported production app. The tests assert visible setup, balances,
-rollback/retry, ownership handoff, and offline reopening after browser closure.
+Tests use real OPFS, a unique loopback hostname and port for each journey, and
+a fresh disk-backed profile for each WebKit journey. The unique host keeps
+WebKit's origin-scoped OPFS data isolated across test runs, even after a profile
+is removed. A local test server can alter the served worker to inject write or
+migration failures, interrupt an active transaction, or lose a save reply.
+These controls are absent from the exported production app. The tests assert
+visible setup, balances, transaction corrections and deletions, rollback and
+retry, ownership handoff, and offline reopening after browser closure.
+
+Upgrade journeys serve prior product shells and workers first, then switch the
+same origin to the current app. The setup-era v1 build checks schema migration,
+worker ownership handoff, retained balance and history, and an offline write.
+The populated v3 build carries an expense and an exported backup through the
+shell update, restores that backup, then reopens offline. A separate v1
+migration failure injects an error after the migration statements run, so the
+transaction must restore the old schema before a retry. The quota journey
+checks the visible error and confirms that the saved account remains available
+after retry.
+
+Backup export downloads the versioned JSON contract described in
+[`finance-storage.md`](../../docs/finance-storage.md#backup-contract).
+Restore uses the browser's file picker and validates contents regardless of the
+file extension or reported MIME type. Candidate data is checked before an
+atomic replacement; failure leaves the existing local ledger available. The
+Chromium and disk-backed WebKit journeys cover real downloads, file selection,
+rejected candidates, valid round trips, rollback after replacement begins, and
+offline reopen followed by another write. Export and restore through Files in
+the installed iPhone app still need physical-device acceptance.
 
 The database uses product-specific OPFS paths and a Web Lock acquired before
 opening files. It never opens the probe's files. Startup preserves existing
@@ -41,17 +68,29 @@ releases file handles before the ownership lock. Another tab can then retry
 opening the same saved account. Safari and the installed Home Screen app have
 separate stores.
 
-The schema stores currencies, profiles, accounts, and one setup completion
-record. Each table has an explicit primary key. Currency precision depends
-only on currency code; profile preferences depend on profile ID; opening
-balance and currency depend on account ID. Setup references its profile and
-first account. No derived display balance, duplicated currency metadata, or
-profile snapshot is stored. Related setup inserts share one immediate SQLite
-transaction. Stable local profile/account keys and a singleton completion
-record make retries return the committed setup without another opening record.
-A missing save reply terminates the worker after 15 seconds and exposes a retry.
-Retrying checks canonical setup before inserting. Local setup has no Clerk or
-Convex dependency.
+The strict SQLite schema normalizes currencies, profiles, accounts, setup,
+adjustments, categories, expenses, incomes, transfers, budgets, and pending
+operations. Planned entries stay out of balances and budget progress until
+they are logged. Balances and budget progress derive from canonical records
+rather than stored totals. Transfer principal is excluded from spending; its
+linked fee expense counts once. Setup, finance writes, budget saves or clears,
+and their pending operation records commit atomically. Stable operation IDs let
+a retry find the committed change or reject changed content under the same ID.
+A missing save reply terminates the worker after 15 seconds so a retry can
+check whether the write committed. Schema versions and migration paths are
+documented in [local finance storage](../../docs/finance-storage.md). Local use
+has no Clerk or Convex dependency.
+
+The recovered planned-entry, budget, and transfer rules come from static Tarsi
+WEB code. Kuwi keeps future-dated entries planned across reopening and requires
+an explicit Log action. Tarsi iPhone 2.5.9 acceptance remains pending. Kuwi's
+budget screen covers built-in expense categories; custom and hidden categories,
+subcategory budgets, and Pro entitlements are outside the current app.
+Cross-currency progress stays unavailable because Kuwi has no exchange-quote
+source. Monthly budget cycles use a saved start day from 1 to 31, defaulting to
+day 1. Short months use their last day when the selected day does not exist.
+Physical iPhone acceptance for planned entries,
+transfers, budgets, and backup round trips remains pending.
 
 The six observed currency tiles are PHP, USD, EUR, GBP, JPY, and TWD. PHP, Cash,
 and zero are the defaults. JPY uses whole units; the other enabled currencies
@@ -91,18 +130,23 @@ Build Output configuration. Local Vercel credentials and environment files
 are ignored. The earlier Cloudflare storage probe remains a separate test.
 No Cloudflare product deployment or storage migration was needed.
 
-## Validation on 2026-11-07
+## Validation on 2026-11-08
 
-TypeScript, JavaScript syntax, and diff checks pass. All 18 Chromium/WebKit
-journeys passed, including interruption during an active transaction. The
-interruption test exercises visible Retry opening while Chromium releases the
-terminated worker's ownership lock, then verifies a single saved account.
-Standards and spec reviews found no actionable findings in the final test change.
-The app had no ESLint configuration. Expo's automatic lint setup failed its own
-version check; running the generated configuration directly reported the
-existing synchronous state reset in the startup effect (`index.tsx:54`). The
-automatically generated configuration and dependency changes were removed.
-Lint is not a passing check.
+`npm exec --yes --package=pnpm@11.25.0 -- pnpm check` passed lint, TypeScript,
+the static build, ten unit tests, and 176 Playwright journeys: 88 in Chromium
+and 88 in disk-backed WebKit. WebKit retained OPFS data for the same origin
+after a persistent context closed and a second profile opened. Each journey
+uses a unique `.localhost` hostname so a reused port cannot expose another
+journey's database.
+
+Coverage includes both v7-to-v8 migration layouts and both populated v8-to-v9
+layouts, planned-entry logging and date rules, overdue edits and deletion,
+backup validation, retries and rollback, and offline reopening. Cross-currency
+checks preserve source and received minor-unit amounts, canonical decimal
+rates, transfer receipts, and budget definitions. The verified WEB rules for
+planned entries are accepted for this stage. Physical iPhone acceptance for
+planned entries, transfers, budgets, income, and Files backup export and restore
+remains pending.
 
 Physical iPhone installation, offline reopening, and populated Safari ownership
 handoff passed as described below. The iPhone 18 Pro simulator on iOS 27.2
@@ -118,7 +162,9 @@ Kuwi uses the observed sequence and defaults with its own cream/sage layout and
 quokka artwork. This verifies usable setup transitions, not identical Tarsi
 animation timing or artwork. Blank-name validation and non-PHP precision still
 come from the separate shipped-web evidence, not new native observations.
-Backup/restore and later finance journeys remain work under the parent issue.
+Physical iPhone Files export and restore, income entry, and later finance
+journeys remain outstanding. Browser journeys do not establish installed-app
+picker or download behavior.
 
 ## Vercel verification on 2026-11-07
 

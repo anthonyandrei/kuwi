@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kuwi previous shell fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Kuwi previous shell</h1>
+      <form>
+        <label>Preferred name <input name="preferredName" value="Anthony" /></label>
+        <label>Account name <input name="accountName" value="Cash" /></label>
+        <label>Opening balance (PHP) <input name="openingBalance" value="1234.56" /></label>
+        <button>Save my account</button>
+      </form>
+      <p role="status" aria-live="polite">Opening local storage…</p>
+      <button type="button" data-action="expense" hidden>Add expense</button>
+      <button type="button" data-action="backup" hidden>Export backup</button>
+      <button type="button" data-action="close" hidden>Close database</button>
+    </main>
+    <script type="module">
+      const worker = new Worker("/db-worker.js", { type: "module" });
+      let sequence = 0;
+      let accountId;
+      const requests = new Map();
+      const status = document.querySelector('[role="status"]');
+      const form = document.querySelector("form");
+      const expense = document.querySelector('[data-action="expense"]');
+      const backup = document.querySelector('[data-action="backup"]');
+      const close = document.querySelector('[data-action="close"]');
+      worker.onmessage = ({ data }) => {
+        const request = requests.get(data.id);
+        if (!request) return;
+        requests.delete(data.id);
+        if (data.error) request.reject(Error(data.error));
+        else request.resolve(data.result);
+      };
+      /**
+       * Send one prior-build worker command.
+       * @param {string} command - Command supported by the v3 worker.
+       * @param {object} [args={}] - Command-specific values.
+       * @returns {Promise<*>} Command result; rejects on a worker error.
+       */
+      function send(command, args = {}) {
+        return new Promise((resolve, reject) => {
+          const id = ++sequence;
+          requests.set(id, { resolve, reject });
+          worker.postMessage({ id, command, args });
+        });
+      }
+      /**
+       * Render a completed setup and expose its account ID for expense entry.
+       * @param {object} saved - Setup result containing the canonical account ID.
+       */
+      function show(saved) {
+        accountId = saved.account_id;
+        status.textContent = `Welcome, ${saved.preferred_name}. ${saved.account_name}: ₱${(saved.accounts.find((row) => row.id === accountId).balance_minor / 100).toFixed(2)}`;
+        form.hidden = true;
+        expense.hidden = false;
+        backup.hidden = false;
+        close.hidden = false;
+      }
+      /** @returns {string} Today's local date as YYYY-MM-DD for the v3 expense API. */
+      function localDate() {
+        const date = new Date();
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+      }
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const values = new FormData(form);
+        try {
+          show(await send("complete", {
+            name: values.get("preferredName"),
+            account: values.get("accountName"),
+            currency: "PHP",
+            amountMinor: Math.round(Number(values.get("openingBalance")) * 100),
+          }));
+        } catch (error) {
+          status.textContent = error.message;
+        }
+      });
+      expense.addEventListener("click", async () => {
+        try {
+          const result = await send("createExpense", {
+            operationId: "legacy-expense-1",
+            accountId,
+            categoryId: "food",
+            amountMinor: 1000,
+            date: localDate(),
+            note: "Legacy coffee",
+          });
+          status.textContent = `Legacy balance: ₱${(result.ledger.account.balance_minor / 100).toFixed(2)}`;
+        } catch (error) {
+          status.textContent = error.message;
+        }
+      });
+      backup.addEventListener("click", async () => {
+        try {
+          const data = JSON.stringify(await send("exportBackup"));
+          const link = document.createElement("a");
+          link.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+          link.download = "kuwi-backup.json";
+          link.click();
+          URL.revokeObjectURL(link.href);
+        } catch (error) {
+          status.textContent = error.message;
+        }
+      });
+      close.addEventListener("click", async () => {
+        await send("close");
+        status.textContent = "Database closed";
+      });
+      send("state").then((saved) => saved && show(saved), (error) => { status.textContent = error.message; });
+    </script>
+  </body>
+</html>
