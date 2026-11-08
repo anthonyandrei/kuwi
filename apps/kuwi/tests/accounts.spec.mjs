@@ -203,11 +203,23 @@ const test = base.extend({
           if(originalVersion===0){db.exec(${JSON.stringify(populatedV1)});}
           const version = db.selectValue("PRAGMA user_version");`,
         );
-        if (failMigration)
-          result = result.replace(
-            '      PRAGMA user_version=2;\n    `);\n  });\n}\n\n/** Add ordinary expenses',
-            '      PRAGMA user_version=2;\n    `);\n    if (!self.__legacyMigrationFailed) { self.__legacyMigrationFailed = true; throw Error("Simulated migration failure"); }\n  });\n}\n\n/** Add ordinary expenses',
-          );
+        if (failMigration) {
+          const migrationStart = result.indexOf("function migrateV1() {");
+          const migrationEnd = result.indexOf("\nfunction migrateExpenses()", migrationStart);
+          if (migrationStart < 0 || migrationEnd < 0)
+            throw Error("Could not locate the v1 migration for failure injection.");
+          const migration = result.slice(migrationStart, migrationEnd);
+          const versionStatement = migration.lastIndexOf("PRAGMA user_version=2;");
+          const sqlEnd = migration.indexOf("`);", versionStatement);
+          if (versionStatement < 0 || sqlEnd < 0)
+            throw Error("Could not locate the v1 migration transaction boundary.");
+          const insertionPoint = sqlEnd + 3;
+          const failedMigration =
+            migration.slice(0, insertionPoint) +
+            '\n    if (!self.__legacyMigrationFailed) { self.__legacyMigrationFailed = true; throw Error("Simulated migration failure"); }' +
+            migration.slice(insertionPoint);
+          result = result.slice(0, migrationStart) + failedMigration + result.slice(migrationEnd);
+        }
         return result;
       }
       return source;
