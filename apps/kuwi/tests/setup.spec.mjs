@@ -174,6 +174,7 @@ test("a quota failure stays visible and reopening keeps the saved account", asyn
   storageFault.disableCache = true;
   await fundedSetup(page);
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await openTroubleshooting(page);
   await page.getByRole("button", { name: "Close database", exact: true }).click();
 
   storageFault.current = "quota";
@@ -257,6 +258,7 @@ test("setup persists offline and hands ownership to another tab", async ({
   const second = await context.newPage();
   await second.goto("/");
   await expect(second.getByRole("alert")).toContainText("Database busy");
+  await openTroubleshooting(page);
   await page
     .getByRole("button", { name: "Close database", exact: true })
     .click();
@@ -371,6 +373,7 @@ test("setup retry rejects the same operation ID with different details", async (
   await page.getByLabel("Opening balance (PHP)", { exact: true }).fill("25");
   await page.getByRole("button", { name: "Save my account", exact: true }).click();
   await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
+  await openTroubleshooting(page);
   await page.getByRole("button", { name: "Close database", exact: true }).click();
   await expect(page.getByText("Database closed", { exact: true })).toBeVisible();
 
@@ -481,6 +484,7 @@ test("failed version-three migration preserves a version-two account and can reo
   storageFault.current = "downgrade-v2";
   await fundedSetup(page);
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await openTroubleshooting(page);
   await page
     .getByRole("button", { name: "Close database", exact: true })
     .click();
@@ -518,6 +522,7 @@ test("failed version 4 migration preserves populated version-three history", asy
   await expect(page.getByText("₱990.00", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await openTroubleshooting(page);
   await page.getByRole("button", { name: "Close database", exact: true }).click();
   storageFault.current = "downgrade-v3";
   await runWorkerCommand(page, "testDowngradeV3");
@@ -546,11 +551,15 @@ test("renaming an account leaves linked expense history and balance intact", asy
   await page.getByRole("button", { name: "Add expense", exact: true }).click();
   await page.getByLabel("Expense amount", { exact: true }).fill("10");
   await page.getByLabel("Expense note", { exact: true }).fill("Coffee");
-  await page.getByRole("button", { name: "Food", exact: true }).click();
+  const foodCategory = page.getByRole("button", { name: "Food", exact: true });
+  await foodCategory.click();
+  await expect(foodCategory).toHaveAttribute("aria-selected", "true");
+  await expect(foodCategory).toContainText("✓");
   await page.getByRole("button", { name: "Save expense", exact: true }).click();
   await expect(page.getByText("₱990.00", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await openTroubleshooting(page);
   await page.getByRole("button", { name: "Close database", exact: true }).click();
   await runWorkerCommand(page, "testRenameAccount", { name: "Everyday" });
   storageFault.current = null;
@@ -571,6 +580,14 @@ async function fundedSetup(page) {
   await page.getByRole("button", { name: "Save my account", exact: true }).click();
   await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+}
+
+/** Open database troubleshooting from the account list.
+ * @param {import("@playwright/test").Page} page - Product page with the account list open.
+ * @returns {Promise<void>} Resolves after troubleshooting opens.
+ */
+async function openTroubleshooting(page) {
+  await page.getByRole("button", { name: "Database troubleshooting", exact: true }).click();
 }
 
 /** Return a browser-local date offset from today for date-only journeys. */
@@ -595,7 +612,10 @@ test("expense journey saves history and derives the offline account balance", as
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
   });
   await page.getByLabel("Expense date", { exact: true }).fill(yesterday);
-  await page.getByRole("button", { name: "Food", exact: true }).click();
+  const foodCategory = page.getByRole("button", { name: "Food", exact: true });
+  await foodCategory.click();
+  await expect(foodCategory).toHaveAttribute("aria-selected", "true");
+  await expect(foodCategory).toContainText("✓");
   await page.getByRole("button", { name: "Save expense", exact: true }).click();
 
   await expect(page.getByText("₱987.65", { exact: true })).toBeVisible();
@@ -843,7 +863,7 @@ test("failed expense write leaves history and balance unchanged before retry", a
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Transaction history", exact: true }).click();
-  await expect(page.getByText("Your transactions will appear here.")).toBeVisible();
+  await expect(page.getByText("Your activity will appear here after your first entry.")).toBeVisible();
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await page.getByRole("button", { name: "Add expense", exact: true }).click();
   await page.getByLabel("Expense amount", { exact: true }).fill("10");
@@ -1188,6 +1208,7 @@ test("transfer retries reuse one operation and reject conflicting operation IDs"
   await expect(page.getByText("₱100.00", { exact: true })).toBeVisible();
   storageFault.current = null;
 
+  await openTroubleshooting(page);
   await page.getByRole("button", { name: "Close database", exact: true }).click();
   const saved = await runWorkerCommand(page, "state");
   const cash = saved.accounts.find((account) => account.name === "Cash");
@@ -1402,6 +1423,7 @@ test("transfer eligibility is visible and cross-currency accounts remain eligibl
   await expect(page.getByRole("button", { name: "Save transfer", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await openTroubleshooting(page);
   await page.getByRole("button", { name: "Close database", exact: true }).click();
 
   const state = await runWorkerCommand(page, "state");

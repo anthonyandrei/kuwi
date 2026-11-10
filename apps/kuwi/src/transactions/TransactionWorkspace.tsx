@@ -1,5 +1,6 @@
-import { createElement, useRef, useState } from "react";
+import { createElement, useEffect, useRef, useState } from "react";
 import {
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -17,8 +18,15 @@ import {
 } from "./entry";
 import type { TransactionLedger, TransactionRecord } from "../storage/client";
 
-const ink = "#293c32";
-const sage = "#486b51";
+const ink = "var(--kuwi-ink)";
+const sage = "var(--kuwi-accent-button)";
+const accentText = "var(--kuwi-accent-text)";
+const transactionDrafts = new Map<string, { amount: string; note: string; date: string; categoryId: string; accountId: string }>();
+
+/** Discard every in-memory transaction draft after the ledger is replaced. */
+export function clearTransactionDrafts(): void {
+  transactionDrafts.clear();
+}
 
 /**
  * Format an integer minor-unit amount using its account currency precision.
@@ -42,24 +50,36 @@ function formatMoney(minor: number, currency: string, digits: number): string {
  * @param ledger - Selected account, all account balances, canonical categories, transactions, and transfers.
  * @param onBack - Return to the selected account screen.
  * @param onLedgerChange - Publish the refreshed ledger after a successful mutation.
- * @returns The form or combined transaction history for the selected account.
+ * @param activeRoute - Current URL view used to reopen transaction editing after browser navigation.
+ * @param activeTransactionId - Transaction selected by a `transaction-edit` URL.
+ * @param onNavigate - Push an edit or history location while retaining the selected account.
+ * @returns The form or combined transaction history; new-form drafts remain available during same-session navigation.
  */
 export function TransactionWorkspace({
   mode,
   ledger,
   onBack,
   onLedgerChange,
+  activeRoute,
+  activeTransactionId,
+  onNavigate,
 }: {
   mode: "expense" | "income" | "history";
   ledger: TransactionLedger;
   onBack: () => void;
   onLedgerChange: (next: TransactionLedger) => void;
+  activeRoute?: string;
+  activeTransactionId?: string;
+  onNavigate?: (view: string, accountId: string, transactionId?: string) => void;
 }) {
-  const [amount, setAmount] = useState("");
-  const [note, setNote] = useState("");
-  const [date, setDate] = useState(getLocalDate());
-  const [categoryId, setCategoryId] = useState(mode === "expense" ? "other" : "");
+  const draftKey = `${ledger.account.id}:${mode}`;
+  const savedDraft = transactionDrafts.get(draftKey);
+  const [amount, setAmount] = useState(savedDraft?.amount ?? "");
+  const [note, setNote] = useState(savedDraft?.note ?? "");
+  const [date, setDate] = useState(savedDraft?.date ?? getLocalDate());
+  const [categoryId, setCategoryId] = useState(savedDraft?.categoryId ?? (mode === "expense" ? "other" : ""));
   const [error, setError] = useState("");
+  const [fieldError, setFieldError] = useState<{ field: "amount" | "date"; message: string } | null>(null);
   const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<TransactionRecord | null>(null);
@@ -67,17 +87,33 @@ export function TransactionWorkspace({
   const [confirmingLog, setConfirmingLog] = useState<TransactionRecord | null>(null);
   const [loggingIncome, setLoggingIncome] = useState<TransactionRecord | null>(null);
   const [actualIncomeAmount, setActualIncomeAmount] = useState("");
-  const [accountId, setAccountId] = useState(ledger.account.id);
+  const [accountId, setAccountId] = useState(savedDraft?.accountId ?? ledger.account.id);
   const operationAttempt = useRef<{
     key: string;
     operationId: string;
     planned?: boolean;
     plannedDate?: string;
   } | null>(null);
+  const editTransactionRef = useRef<(transaction: TransactionRecord, navigate?: boolean) => void>(() => {});
   const { account } = ledger;
   const activeAccount = ledger.accounts.find((candidate) => candidate.id === accountId) ?? account;
   const currency = activeAccount.currency_code;
   const today = getLocalDate();
+
+  useEffect(() => {
+    if (!editing) transactionDrafts.set(draftKey, { amount, note, date, categoryId, accountId });
+  }, [draftKey, amount, note, date, categoryId, accountId, editing]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      if (activeRoute === "history" && editing) setEditing(null);
+      if (activeRoute === "transaction-edit" && activeTransactionId && editing?.id !== activeTransactionId) {
+        const transaction = ledger.transactions.find(({ id }) => id === activeTransactionId);
+        if (transaction) editTransactionRef.current(transaction, false);
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeRoute, activeTransactionId, editing, ledger.transactions]);
 
   /** Keep one mutation ID and initial planned intent until its logical action succeeds.
    * @param key - Serialized action type and create mode or transaction identity.
@@ -108,7 +144,9 @@ export function TransactionWorkspace({
       ? validateIncomeDate(date)
       : validateExpenseDate(date);
     if (dateError) {
-      setError(dateError);
+      setError("");
+      setFieldError({ field: "date", message: dateError });
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>(`[aria-label="${isIncome ? "Income" : "Expense"} date"]`)?.focus());
       return;
     }
 
@@ -118,14 +156,16 @@ export function TransactionWorkspace({
       ? parseIncomeAmount(amount, activeAccount.decimal_places, isPlannedIncome)
       : parseExpenseAmount(amount, activeAccount.decimal_places);
     if (amountMinor === null) {
-      setError(
-        isIncome
+      const message = isIncome
           ? "Enter a valid income amount. Planned income may be zero; posted income must be greater than zero."
-          : "Enter an expense amount greater than zero.",
-      );
+          : "Enter an expense amount greater than zero.";
+      setError("");
+      setFieldError({ field: "amount", message });
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>(`[aria-label="${editing ? "Transaction" : isIncome ? "Income" : "Expense"} amount"]`)?.focus());
       return;
     }
 
+    setFieldError(null);
     setError("");
     setSaving(true);
     try {
@@ -146,6 +186,8 @@ export function TransactionWorkspace({
         operationAttempt.current = null;
         setEditing(null);
         setStatus("Transaction updated.");
+        onNavigate?.("history", account.id);
+        transactionDrafts.delete(draftKey);
       } else {
         const request = {
           accountId: activeAccount.id,
@@ -171,6 +213,7 @@ export function TransactionWorkspace({
       setNote("");
       setDate(getLocalDate());
       setCategoryId(isIncome ? "" : "other");
+      transactionDrafts.delete(draftKey);
       if (!isEditing) onBack();
     } catch (failure) {
       setError((failure as Error).message);
@@ -263,9 +306,10 @@ export function TransactionWorkspace({
 
   /** Populate the editor with a saved transaction's account precision and fields.
    * @param transaction - Expense or income row selected from the current account's history.
+   * @param navigate - Whether to push the transaction's edit URL after loading its fields.
    * @returns Nothing; updates local editor state.
    */
-  function editTransaction(transaction: TransactionRecord) {
+  function editTransaction(transaction: TransactionRecord, navigate = true) {
     const transactionAccount = ledger.accounts.find(
       (candidate) => candidate.id === transaction.account_id,
     ) ?? account;
@@ -280,7 +324,11 @@ export function TransactionWorkspace({
     setCategoryId(transaction.category_id ?? (transaction.kind === "expense" ? "other" : ""));
     setError("");
     setStatus("");
+    if (navigate) onNavigate?.("transaction-edit", account.id, transaction.id);
   }
+  useEffect(() => {
+    editTransactionRef.current = editTransaction;
+  });
 
   const isIncome = (editing?.kind ?? mode) === "income";
   const originalAccount = editing
@@ -297,7 +345,7 @@ export function TransactionWorkspace({
         <Pressable accessibilityRole="button" onPress={onBack} style={styles.back}>
           <Text style={styles.backText}>Back to account</Text>
         </Pressable>
-        <Text style={styles.title}>Transaction history</Text>
+        <Text accessibilityRole="header" nativeID="route-heading" style={styles.title}>Transaction history</Text>
         {status ? <Text accessibilityRole="status" style={styles.success}>{status}</Text> : null}
         {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
         <View style={styles.balanceSummary}>
@@ -307,7 +355,10 @@ export function TransactionWorkspace({
           </Text>
         </View>
         {ledger.transactions.length === 0 && ledger.transfers.length === 0 ? (
-          <Text style={styles.copy}>Your transactions will appear here.</Text>
+          <View style={styles.emptyState}>
+            <Image source={{ uri: "/quokka.png" }} style={styles.emptyMascot} accessibilityLabel="Kuwi the quokka" />
+            <Text style={styles.copy}>Your activity will appear here after your first entry.</Text>
+          </View>
         ) : (
           <ScrollView style={styles.history}>
             {[
@@ -506,10 +557,10 @@ export function TransactionWorkspace({
 
   return (
     <View style={styles.content}>
-      <Pressable accessibilityRole="button" onPress={() => editing ? setEditing(null) : onBack()} style={styles.back}>
+      <Pressable accessibilityRole="button" onPress={() => editing ? onNavigate?.("history", account.id) : onBack()} style={styles.back}>
         <Text style={styles.backText}>{editing ? "Back to transaction history" : "Back to account"}</Text>
       </Pressable>
-      <Text style={styles.title}>{editing ? `Edit ${isIncome ? "income" : "expense"}` : isIncome ? "Add income" : "Add an expense"}</Text>
+      <Text accessibilityRole="header" nativeID="route-heading" style={styles.title}>{editing ? `Edit ${isIncome ? "income" : "expense"}` : isIncome ? "Add income" : "Add an expense"}</Text>
       <Text style={styles.copy}>
         {editing ? "Correct the saved transaction details." : isIncome
           ? `Record income for ${account.name}.`
@@ -536,12 +587,14 @@ export function TransactionWorkspace({
               <Pressable
                 key={candidate.id}
                 accessibilityRole="button"
+                aria-selected={candidate.id === activeAccount.id}
+                accessibilityLabel={candidate.name}
                 accessibilityState={{ selected: candidate.id === activeAccount.id }}
                 onPress={() => setAccountId(candidate.id)}
                 style={[styles.category, candidate.id === activeAccount.id && styles.categorySelected]}
               >
                 <Text style={[styles.categoryText, candidate.id === activeAccount.id && styles.categoryTextSelected]}>
-                  {candidate.name}
+                  {candidate.name}{candidate.id === activeAccount.id ? "  ✓" : ""}
                 </Text>
               </Pressable>
             ))}
@@ -551,18 +604,22 @@ export function TransactionWorkspace({
       <Text style={styles.label}>Amount ({currency})</Text>
       <TextInput
         accessibilityLabel={editing ? "Transaction amount" : isIncome ? "Income amount" : "Expense amount"}
+        accessibilityHint={fieldError?.field === "amount" ? fieldError.message : undefined}
         value={amount}
-        onChangeText={setAmount}
+        onChangeText={(value) => { setAmount(value); if (fieldError?.field === "amount") setFieldError(null); }}
         keyboardType="decimal-pad"
         placeholder="0"
         style={styles.input}
       />
+      {fieldError?.field === "amount" ? <Text accessibilityRole="alert" style={styles.error}>{fieldError.message}</Text> : null}
       <Text style={styles.label}>{isIncome ? "Category (optional)" : "Category"}</Text>
       <View style={styles.categories}>
         {categories.map((category) => (
           <Pressable
             key={category.id || "no-category"}
             accessibilityRole="button"
+            aria-selected={categoryId === category.id}
+            accessibilityLabel={category.label}
             accessibilityState={{ selected: categoryId === category.id }}
             onPress={() => setCategoryId(category.id)}
             style={[
@@ -577,6 +634,7 @@ export function TransactionWorkspace({
               ]}
             >
               {category.label}
+              {categoryId === category.id ? "  ✓" : ""}
             </Text>
           </Pressable>
         ))}
@@ -584,21 +642,26 @@ export function TransactionWorkspace({
       <Text style={styles.label}>Date</Text>
       {createElement("input", {
         "aria-label": isIncome ? "Income date" : "Expense date",
+        "aria-describedby": fieldError?.field === "date" ? "transaction-date-error" : undefined,
+        "aria-invalid": fieldError?.field === "date" ? "true" : undefined,
         type: "date",
         value: date,
-        onChange: (event: { currentTarget: { value: string } }) =>
-          setDate(event.currentTarget.value),
+        onChange: (event: { currentTarget: { value: string } }) => {
+          setDate(event.currentTarget.value);
+          if (fieldError?.field === "date") setFieldError(null);
+        },
         style: {
           boxSizing: "border-box",
           width: "100%",
           padding: 16,
-          border: "1px solid #83927e",
+          border: "1px solid var(--kuwi-border)",
           borderRadius: 14,
           fontSize: 18,
           color: ink,
-          backgroundColor: "#fffdf7",
+          backgroundColor: "var(--kuwi-surface)",
         },
       })}
+      {fieldError?.field === "date" ? <Text nativeID="transaction-date-error" accessibilityRole="alert" style={styles.error}>{fieldError.message}</Text> : null}
       <Text style={styles.label}>Note</Text>
       <TextInput
         accessibilityLabel={isIncome ? "Income note" : "Expense note"}
@@ -617,6 +680,18 @@ export function TransactionWorkspace({
           {saving ? "Saving…" : editing ? "Save changes" : isIncome ? "Save income" : "Save expense"}
         </Text>
       </Pressable>
+      <Pressable accessibilityRole="button" disabled={saving} onPress={() => {
+        transactionDrafts.delete(draftKey);
+        setAmount("");
+        setNote("");
+        setDate(getLocalDate());
+        setCategoryId(mode === "expense" ? "other" : "");
+        setError("");
+        if (editing) onNavigate?.("history", account.id);
+        else onBack();
+      }} style={styles.back}>
+        <Text style={styles.backText}>Cancel</Text>
+      </Pressable>
       <Text style={styles.hint}>
         {isIncome
           ? "Future-dated income stays planned and does not change the balance until you log it."
@@ -629,19 +704,21 @@ export function TransactionWorkspace({
 const styles = StyleSheet.create({
   content: { gap: 16 },
   back: { alignSelf: "flex-start", minHeight: 44, justifyContent: "center" },
-  backText: { color: sage, fontSize: 15, fontWeight: "700" },
+  backText: { color: accentText, fontSize: 15, fontWeight: "700" },
   title: { color: ink, fontSize: 28, lineHeight: 34, fontWeight: "700" },
   copy: { color: ink, fontSize: 16, lineHeight: 24 },
+  emptyState: { alignItems: "center", gap: 10, paddingVertical: 12 },
+  emptyMascot: { width: 96, height: 96, resizeMode: "contain" },
   label: { color: ink, fontSize: 15, fontWeight: "700" },
   input: {
     minHeight: 54,
     paddingHorizontal: 16,
     borderWidth: 1,
-    borderColor: "#83927e",
+    borderColor: "var(--kuwi-border)",
     borderRadius: 14,
     fontSize: 17,
     color: ink,
-    backgroundColor: "#fffdf7",
+    backgroundColor: "var(--kuwi-surface)",
   },
   categories: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   category: {
@@ -649,11 +726,11 @@ const styles = StyleSheet.create({
     minHeight: 44,
     paddingHorizontal: 12,
     borderWidth: 1,
-    borderColor: "#c5cec0",
+    borderColor: "var(--kuwi-border)",
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fffdf7",
+    backgroundColor: "var(--kuwi-surface)",
   },
   categorySelected: { backgroundColor: sage, borderColor: sage },
   categoryText: { color: ink, fontWeight: "600" },
@@ -667,17 +744,17 @@ const styles = StyleSheet.create({
   },
   saveText: { color: "#ffffff", fontSize: 16, fontWeight: "700" },
   disabled: { opacity: 0.55 },
-  hint: { color: "#526355", fontSize: 13, lineHeight: 19 },
+  hint: { color: "var(--kuwi-secondary-text)", fontSize: 13, lineHeight: 19 },
   error: {
     padding: 14,
     borderRadius: 12,
-    color: "#752e1a",
-    backgroundColor: "#fae7de",
+    color: "var(--kuwi-error-fg)",
+    backgroundColor: "var(--kuwi-error-bg)",
   },
   balanceSummary: {
     paddingVertical: 14,
     borderBottomWidth: 1,
-    borderBottomColor: "#d8dfd2",
+    borderBottomColor: "var(--kuwi-divider)",
     gap: 6,
   },
   balance: { color: ink, fontSize: 26, fontWeight: "700" },
@@ -686,7 +763,7 @@ const styles = StyleSheet.create({
     gap: 10,
     paddingVertical: 16,
     borderBottomWidth: 1,
-    borderBottomColor: "#d8dfd2",
+    borderBottomColor: "var(--kuwi-divider)",
   },
   entryMain: {
     flexDirection: "row",
@@ -696,40 +773,40 @@ const styles = StyleSheet.create({
   },
   entryCopy: { flex: 1, gap: 5 },
   entryTitle: { color: ink, fontSize: 16, fontWeight: "700" },
-  meta: { color: "#526355", fontSize: 12, lineHeight: 18 },
+  meta: { color: "var(--kuwi-secondary-text)", fontSize: 12, lineHeight: 18 },
   entryAmount: { color: ink, fontSize: 16, fontWeight: "700" },
-  incomeAmount: { color: sage, fontSize: 16, fontWeight: "700" },
-  success: { color: sage, fontSize: 14, fontWeight: "600" },
+  incomeAmount: { color: accentText, fontSize: 16, fontWeight: "700" },
+  success: { color: "var(--kuwi-success-fg)", fontSize: 14, fontWeight: "600" },
   entryActions: { flexDirection: "row", alignItems: "center", gap: 6 },
   actionButton: {
     minHeight: 44,
     minWidth: 48,
     paddingHorizontal: 10,
     borderWidth: 1,
-    borderColor: "#c5cec0",
+    borderColor: "var(--kuwi-border)",
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fffdf7",
+    backgroundColor: "var(--kuwi-surface)",
   },
-  actionText: { color: sage, fontSize: 13, fontWeight: "700" },
-  deleteText: { color: "#752e1a", fontSize: 13, fontWeight: "700" },
+  actionText: { color: accentText, fontSize: 13, fontWeight: "700" },
+  deleteText: { color: "var(--kuwi-error-fg)", fontSize: 13, fontWeight: "700" },
   deleteButton: {
     minHeight: 44,
     paddingHorizontal: 12,
     borderWidth: 1,
-    borderColor: "#d7a08c",
+    borderColor: "var(--kuwi-danger-border)",
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "#fae7de",
+    backgroundColor: "var(--kuwi-error-bg)",
   },
   confirmation: {
     gap: 12,
     padding: 16,
     borderWidth: 1,
-    borderColor: "#d7a08c",
+    borderColor: "var(--kuwi-danger-border)",
     borderRadius: 14,
-    backgroundColor: "#fff8f2",
+    backgroundColor: "var(--kuwi-danger-surface)",
   },
 });

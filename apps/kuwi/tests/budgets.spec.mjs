@@ -97,6 +97,14 @@ async function openBudgets(page) {
   await expect(page.getByRole("heading", { name: "Budgets", level: 1 })).toBeVisible();
 }
 
+/** Open the backup tools from the account list.
+ * @param {import("@playwright/test").Page} page - Product page with the account list open.
+ * @returns {Promise<void>} Resolves after data management opens.
+ */
+async function openDataManagement(page) {
+  await page.getByRole("button", { name: "Data management", exact: true }).click();
+}
+
 test("monthly cycle preference changes budget periods and survives backup restore", async ({ page }) => {
   await finishSetup(page);
   await openBudgets(page);
@@ -122,6 +130,7 @@ test("monthly cycle preference changes budget periods and survives backup restor
 
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup", exact: true }).click();
   const backup = JSON.parse(await readFile(await (await downloadPromise).path(), "utf8"));
   expect(backup.schemaVersion).toBe(10);
@@ -134,10 +143,41 @@ test("monthly cycle preference changes budget periods and survives backup restor
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify(backup)),
   });
+  await expect(page.getByRole("button", { name: "Replace local data", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Replace local data", exact: true }).click();
   await expect(page.getByText("Backup restored.", { exact: true })).toBeVisible();
   await openBudgets(page);
   await expect(page.getByLabel("Monthly cycle start day")).toHaveValue("15");
   await expect(page.getByText(period, { exact: false })).toBeVisible();
+});
+
+test("budget type, period, and rollover expose and retain their selected states", async ({ page }) => {
+  await finishSetup(page);
+  await openBudgets(page);
+  await page.getByRole("button", { name: "Set Food budget", exact: true }).click();
+
+  const fixed = page.getByRole("radio", { name: "Fixed amount", exact: true });
+  const monthly = page.getByRole("radio", { name: "Monthly", exact: true });
+  const rollover = page.getByRole("checkbox", { name: "Carry unused budget forward", exact: true });
+  await expect(fixed).toHaveAttribute("aria-checked", "true");
+  await expect(fixed).toContainText("✓");
+  await expect(monthly).toHaveAttribute("aria-checked", "true");
+  await expect(monthly).toContainText("✓");
+  await expect(rollover).toHaveAttribute("aria-checked", "false");
+  await rollover.click();
+  await expect(rollover).toHaveAttribute("aria-checked", "true");
+  await expect(rollover).toContainText("✓");
+
+  const daily = page.getByRole("radio", { name: "Daily", exact: true });
+  await daily.click();
+  await expect(daily).toHaveAttribute("aria-checked", "true");
+  await expect(daily).toContainText("✓");
+  await page.getByLabel("Budget amount", { exact: true }).fill("1000");
+  await page.getByRole("button", { name: "Save budget", exact: true }).click();
+
+  await page.getByRole("button", { name: "Edit Food budget", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "Carry unused budget forward", exact: true })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("radio", { name: "Daily", exact: true })).toHaveAttribute("aria-checked", "true");
 });
 
 test("budget progress follows corrected expenses, income, and transfer fees after offline reopening and restore", async ({
@@ -193,7 +233,6 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await expect(page.getByText("2% used")).toBeVisible();
     await expect(page.getByText("₱980.00 remaining")).toBeVisible();
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
-    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     await page.getByRole("button", { name: "Add account", exact: true }).click();
     await page.getByLabel("Account name", { exact: true }).fill("Reserve");
@@ -228,7 +267,7 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await expect(page.getByText("₱45.00 remaining")).toBeVisible();
 
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
-    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+    await page.getByRole("button", { name: "Database troubleshooting", exact: true }).click();
     await page.getByRole("button", { name: "Close database", exact: true }).click();
     await page.evaluate(async () => {
       await navigator.serviceWorker.ready;
@@ -247,6 +286,7 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
 
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
     const downloadPromise = page.waitForEvent("download");
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
     const download = await downloadPromise;
     const backup = JSON.parse(await readFile(await download.path(), "utf8"));
@@ -268,6 +308,7 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     const chooserPromise = page.waitForEvent("filechooser");
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Restore backup", exact: true }).click();
     const chooser = await chooserPromise;
     await chooser.setFiles({
@@ -275,6 +316,8 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
       mimeType: "application/json",
       buffer: Buffer.from(JSON.stringify(backup)),
     });
+    await expect(page.getByRole("button", { name: "Replace local data", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Replace local data", exact: true }).click();
     await expect(page.getByText("Backup restored.", { exact: true })).toBeVisible();
     await openBudgets(page);
     await expect(page.getByText("2% used")).toBeVisible();
@@ -317,6 +360,7 @@ test("a lost save reply reuses its operation ID and creates one saved budget", a
 
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup", exact: true }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(await readFile(await download.path(), "utf8"));

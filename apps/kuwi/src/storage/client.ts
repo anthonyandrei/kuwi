@@ -291,6 +291,7 @@ export type ProductBackup = {
   integrity: { algorithm: "SHA-256"; digest: string };
   data: ProductBackupData;
 };
+export type BackupReview = { exportedAt: string; accountCount: number };
 
 export type DatabaseResult =
   | Setup
@@ -303,6 +304,7 @@ export type DatabaseResult =
   | BudgetState
   | SaveBudgetResult
   | ProductBackup
+  | BackupReview
   | null;
 type DatabaseCommand =
   | "state"
@@ -320,6 +322,7 @@ type DatabaseCommand =
   | "saveBudget"
   | "saveMonthlyCycleStartDay"
   | "exportBackup"
+  | "inspectBackup"
   | "restoreBackup"
   | "close";
 const writeTimeoutMessages: Partial<Record<DatabaseCommand, string>> = {

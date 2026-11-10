@@ -213,6 +213,14 @@ ${dateHelper.replace("function localDate() {", "function localDate() {\n  if (__
   },
 });
 
+/** Open backup tools from the account list.
+ * @param {import("@playwright/test").Page} page - Product page with the account list open.
+ * @returns {Promise<void>} Resolves after data management opens.
+ */
+async function openDataManagement(page) {
+  await page.getByRole("button", { name: "Data management", exact: true }).click();
+}
+
 /** Freeze the page clock at local noon for one controlled date-only journey.
  * @param {import("@playwright/test").Page} page - Page to receive the clock override.
  * @param {string} value - Local calendar date in YYYY-MM-DD form.
@@ -324,6 +332,7 @@ test("future entries remain planned across offline reopening and log on explicit
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup", exact: true }).click();
   const download = await downloadPromise;
   const { readFile } = await import("node:fs/promises");
@@ -358,6 +367,8 @@ test("future entries remain planned across offline reopening and log on explicit
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify(exported)),
   });
+  await expect(page.getByRole("button", { name: "Replace local data", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Replace local data", exact: true }).click();
   await expect(page.getByText("Backup restored.", { exact: true })).toBeVisible();
   await expect(page.getByText("₱997.00", { exact: true })).toBeVisible();
   await page.evaluate(async () => navigator.serviceWorker.ready);
@@ -645,6 +656,7 @@ test("a populated v7 database migrates to planned transactions with receipts int
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup", exact: true }).click();
   const download = await downloadPromise;
   const { readFile } = await import("node:fs/promises");
@@ -674,6 +686,7 @@ test("a populated currency-aware v8 store keeps transfer amounts and canonical r
   await page.goto("/");
   await expect(page.getByText("₱908.00", { exact: true })).toBeVisible();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup", exact: true }).click();
   const backup = JSON.parse(await readFile(await (await downloadPromise).path(), "utf8"));
   expect(backup.schemaVersion).toBe(10);
@@ -703,6 +716,7 @@ test("a populated planned v8 store gains currency columns without losing planned
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup", exact: true }).click();
   const backup = JSON.parse(await readFile(await (await downloadPromise).path(), "utf8"));
   expect(backup.schemaVersion).toBe(10);
@@ -751,6 +765,7 @@ test("a failed v10 migration preserves populated v9 finance data for a later ret
   await page.getByRole("button", { name: "Back to account", exact: true }).click();
   await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup", exact: true }).click();
   const backup = JSON.parse(await readFile(await (await downloadPromise).path(), "utf8"));
   expect(backup.schemaVersion).toBe(10);

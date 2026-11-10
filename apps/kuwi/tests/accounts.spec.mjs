@@ -321,6 +321,25 @@ async function localDate(page, daysAgo = 0) {
   }, daysAgo);
 }
 
+/** Open data management in the current shell when that destination is available.
+ * Legacy-shell fixtures keep their original backup controls at the root.
+ * @param {import("@playwright/test").Page} page - Browser page to navigate.
+ * @returns {Promise<void>} Resolves when data management is open or the page is a legacy shell.
+ */
+async function openDataManagement(page) {
+  const button = page.getByRole("button", { name: "Data management", exact: true });
+  if (await button.isVisible()) await button.click();
+}
+
+/** Open troubleshooting in the current shell when database controls are nested there.
+ * @param {import("@playwright/test").Page} page - Browser page to navigate.
+ * @returns {Promise<void>} Resolves when troubleshooting is open or the page is a legacy shell.
+ */
+async function openTroubleshooting(page) {
+  const button = page.getByRole("button", { name: "Database troubleshooting", exact: true });
+  if (await button.isVisible()) await button.click();
+}
+
 test("a populated legacy build updates on the same origin and reopens offline", async ({
   browserName,
   baseURL,
@@ -341,6 +360,7 @@ test("a populated legacy build updates on the same origin and reopens offline", 
     await page.getByRole("button", { name: "Save my account" }).click();
     await expect(page.getByRole("status")).toContainText("Welcome, Anthony.");
     await expect(page.getByRole("status")).toContainText("Cash: ₱1234.56");
+    await openTroubleshooting(page);
     await page.getByRole("button", { name: "Close database" }).click();
     await expect(page.getByRole("status")).toHaveText("Database closed");
 
@@ -361,14 +381,18 @@ test("a populated legacy build updates on the same origin and reopens offline", 
     await page.getByRole("button", { name: "Back to account" }).click();
     await page.getByRole("button", { name: "Back to accounts" }).click();
     await page.evaluate(async () => navigator.serviceWorker.ready);
+    await openTroubleshooting(page);
     await page.getByRole("button", { name: "Close database" }).click();
     await context.setOffline(true);
     await page.getByRole("button", { name: "Retry opening" }).click();
     await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash" }).click();
     await page.getByRole("button", { name: "Add expense" }).click();
-    await page.getByLabel("Expense amount").fill("1");
+    const offlineExpenseAmount = page.getByLabel("Expense amount", { exact: true });
+    await offlineExpenseAmount.fill("1");
+    await expect(offlineExpenseAmount).toHaveValue("1");
     await page.getByLabel("Expense note").fill("Offline after legacy update");
+    await expect(offlineExpenseAmount).toHaveValue("1");
     await page.getByRole("button", { name: "Save expense" }).click();
     await expect(page.getByText("₱1,223.56", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Transaction history" }).click();
@@ -402,6 +426,7 @@ test("a legacy expense and backup survive the shell update", async ({
     await expect(page.getByRole("status")).toHaveText("Legacy balance: ₱1224.56");
 
     const downloadPromise = page.waitForEvent("download");
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Export backup" }).click();
     const download = await downloadPromise;
     const backup = readFileSync(await download.path());
@@ -413,6 +438,7 @@ test("a legacy expense and backup survive the shell update", async ({
         expenses: [expect.objectContaining({ note: "Legacy coffee", amount_minor: 1000 })],
       },
     });
+    await openTroubleshooting(page);
     await page.getByRole("button", { name: "Close database" }).click();
     await expect(page.getByRole("status")).toHaveText("Database closed");
 
@@ -456,6 +482,7 @@ test("a legacy expense and backup survive the shell update", async ({
     await page.getByRole("button", { name: "Back to accounts" }).click();
 
     const currentDownloadPromise = page.waitForEvent("download");
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Export backup" }).click();
     const currentDownload = await currentDownloadPromise;
     const currentBackup = JSON.parse(readFileSync(await currentDownload.path(), "utf8"));
@@ -469,6 +496,7 @@ test("a legacy expense and backup survive the shell update", async ({
     });
 
     const chooserPromise = page.waitForEvent("filechooser");
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Restore backup" }).click();
     const chooser = await chooserPromise;
     await chooser.setFiles({
@@ -476,6 +504,8 @@ test("a legacy expense and backup survive the shell update", async ({
       mimeType: "application/json",
       buffer: backup,
     });
+    await expect(page.getByRole("button", { name: "Replace local data", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Replace local data", exact: true }).click();
     await expect(page.getByText("₱1,224.56", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash" }).click();
     await page.getByRole("button", { name: "Transaction history" }).click();
@@ -484,6 +514,7 @@ test("a legacy expense and backup survive the shell update", async ({
     await page.getByRole("button", { name: "Back to accounts" }).click();
 
     await page.evaluate(async () => navigator.serviceWorker.ready);
+    await openTroubleshooting(page);
     await page.getByRole("button", { name: "Close database" }).click();
     await context.setOffline(true);
     await page.getByRole("button", { name: "Retry opening" }).click();
@@ -553,7 +584,13 @@ test("accounts use supported currencies and keep a credit limit separate from ow
   await page.getByRole("button", { name: "Add account" }).click();
   await page.getByLabel("Account name").fill("Travel fund");
   await page.getByRole("radio", { name: "Assets" }).click();
-  await page.getByRole("button", { name: "USD US Dollar" }).click();
+  const assetsOption = page.getByRole("radio", { name: "Assets" });
+  await expect(assetsOption).toHaveAttribute("aria-checked", "true");
+  await expect(assetsOption).toContainText("✓");
+  const usdOption = page.getByRole("button", { name: "USD US Dollar" });
+  await usdOption.click();
+  await expect(usdOption).toHaveAttribute("aria-selected", "true");
+  await expect(usdOption).toContainText("✓");
   await page.getByLabel("Opening balance (USD)").fill("10.50");
   await page.getByRole("button", { name: "Save account" }).click();
   await expect(page.getByText(/(?:US)?\$10\.50/)).toBeVisible();
@@ -691,6 +728,7 @@ test("expense and income edits move effects between accounts and deletions prese
   await expect(page.getByText("₱200.00", { exact: true })).toBeVisible();
 
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -742,6 +780,10 @@ test("a failed transaction edit rolls back stored values before a later correcti
 
   await page.reload();
   await expect(page.getByText("₱988.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to transaction history" }).click();
+  await expect(page.getByText(`Other · ${today} · Cash`)).toBeVisible();
+  await page.getByRole("button", { name: "Back to account" }).click();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
   await page.getByRole("button", { name: "View account Cash" }).click();
   await page.getByRole("button", { name: "Transaction history" }).click();
   await expect(page.getByText(`Other · ${today} · Cash`)).toBeVisible();
@@ -780,6 +822,7 @@ test("a failed delete rolls back its tombstone and sync marker before retry", as
   await page.getByRole("button", { name: "Back to account" }).click();
   await page.getByRole("button", { name: "Back to accounts" }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -821,6 +864,7 @@ test("an edit with a lost reply reuses its saved operation ID", async ({
   await page.getByRole("button", { name: "Back to account" }).click();
   await page.getByRole("button", { name: "Back to accounts" }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -864,6 +908,7 @@ test("a populated v4 database migrates while keeping account and transaction ide
   await page.getByRole("button", { name: "Back to accounts" }).click();
 
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -895,6 +940,7 @@ test("a populated v5 database gains transfer relations without losing transactio
 
   await page.getByRole("button", { name: "Back to accounts" }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -955,6 +1001,7 @@ test("a populated v4 transfer database keeps its transfer and linked fee through
   await page.getByRole("button", { name: "Back to accounts" }).click();
 
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -1015,6 +1062,7 @@ test("cross-currency transfers preserve both minor-unit amounts through history,
   await page.getByRole("button", { name: "Back to accounts" }).click();
 
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -1028,12 +1076,15 @@ test("cross-currency transfers preserve both minor-unit amounts through history,
     }),
   ]);
   const chooserPromise = page.waitForEvent("filechooser");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Restore backup" }).click();
   await (await chooserPromise).setFiles({
     name: "cross-currency.kuwi.json",
     mimeType: "application/json",
     buffer: Buffer.from(JSON.stringify(backup)),
   });
+  await expect(page.getByRole("button", { name: "Replace local data", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Replace local data", exact: true }).click();
   await expect(page.getByText(/(?:JP)?¥14,987/)).toBeVisible();
 });
 
@@ -1067,6 +1118,7 @@ test("received-amount entry keeps its entered minor units when the implied rate 
 
   await page.getByRole("button", { name: "Back to accounts" }).click();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const backup = JSON.parse(readFileSync(await (await downloadPromise).path(), "utf8"));
   expect(backup.data.transfers[0]).toMatchObject({
@@ -1125,6 +1177,7 @@ test("a lost transfer reply reuses the committed conversion and writes its fee o
   await page.getByRole("button", { name: "Back to accounts" }).click();
 
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -1167,6 +1220,7 @@ test("a populated budget-only v7 store retries into v8 without losing budget or 
   await page.reload();
   await expect(page.getByText("₱908.44", { exact: true })).toBeVisible();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -1196,6 +1250,7 @@ test("a populated currency-aware v7 store keeps received amounts when budgets ar
   await page.goto("/");
   await expect(page.getByText("₱908.44", { exact: true })).toBeVisible();
   const downloadPromise = page.waitForEvent("download");
+  await openDataManagement(page);
   await page.getByRole("button", { name: "Export backup" }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(readFileSync(await download.path(), "utf8"));
@@ -1234,6 +1289,7 @@ test("manual transfer entry saves and reopens while offline", async ({ page, con
   await expect(page.getByText("₱900.00", { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByText("₱900.00", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
   await page.getByRole("button", { name: "View account Dollar wallet" }).click();
   await expect(page.getByText(/(?:US)?\$1\.80/)).toBeVisible();
   await page.getByRole("button", { name: "Transaction history" }).click();
@@ -1256,6 +1312,7 @@ test("migrates a populated v1 database into derived account balances", async ({
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByText("Migrated cash", { exact: true })).toBeVisible();
   await expect(page.getByText("₱1,234.56", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Back to accounts" }).click();
   await page.getByRole("button", { name: "View account Migrated cash" }).click();
   await page.getByRole("button", { name: "Add expense" }).click();
   await page.getByLabel("Expense amount").fill("10");
@@ -1271,6 +1328,7 @@ test("migrates a populated v1 database into derived account balances", async ({
   const second = await context.newPage();
   await second.goto("/");
   await expect(second.getByRole("alert")).toContainText("Database busy");
+  await openTroubleshooting(page);
   await page.getByRole("button", { name: "Close database" }).click();
   await context.setOffline(true);
   await second.getByRole("button", { name: "Retry opening" }).click();

@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { createElement, useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { database, type BudgetRecord, type BudgetState, type SaveBudgetInput, type SaveBudgetResult } from "../storage/client";
 
-const ink = "#293c32";
-const sage = "#486b51";
+const ink = "var(--kuwi-ink)";
+const sage = "var(--kuwi-accent-button)";
 const periods: [BudgetRecord["interval"], string][] = [
   ["daily", "Daily"],
   ["weekly", "Weekly"],
@@ -21,6 +21,12 @@ type BudgetForm = {
   biweeklyStartDate: string;
   biweeklyEndDate: string;
 };
+const budgetDrafts = new Map<string, { form: BudgetForm | null; cycleDay: string }>();
+
+/** Discard every in-memory budget draft after the ledger is replaced. */
+export function clearBudgetDrafts(): void {
+  budgetDrafts.clear();
+}
 
 /** Format a stored thousandth value without trailing zeroes for editing.
  * @param milli - Amount in thousandths of the preferred currency unit.
@@ -104,7 +110,7 @@ function formatMoney(value: number, currency: string): string {
  * @param initialState - Category definitions and progress read from local storage.
  * @param onBack - Returns to the account workspace.
  * @param onStateChange - Receives the refreshed canonical and derived budget state after a save.
- * @returns Budget workspace view.
+ * @returns Budget workspace view; unsaved form values remain in memory through same-session route changes.
  */
 export function BudgetWorkspace({
   initialState,
@@ -115,13 +121,19 @@ export function BudgetWorkspace({
   onBack: () => void;
   onStateChange: (state: BudgetState) => void;
 }) {
+  const draftKey = initialState.preferredCurrency ?? "default";
+  const savedDraft = budgetDrafts.get(draftKey);
   const [state, setState] = useState(initialState);
-  const [form, setForm] = useState<BudgetForm | null>(null);
+  const [form, setForm] = useState<BudgetForm | null>(savedDraft?.form ?? null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [cycleDay, setCycleDay] = useState(String(initialState.monthlyCycleStartDay));
+  const [cycleDay, setCycleDay] = useState(savedDraft?.cycleDay ?? String(initialState.monthlyCycleStartDay));
   const [savingCycleDay, setSavingCycleDay] = useState(false);
   const [operationAttempt, setOperationAttempt] = useState<{ key: string; id: string } | null>(null);
+
+  useEffect(() => {
+    budgetDrafts.set(draftKey, { form, cycleDay });
+  }, [draftKey, form, cycleDay]);
 
   /** Open a new form or load a category's current definition.
    * @param categoryId - Built-in expense category ID.
@@ -202,6 +214,7 @@ export function BudgetWorkspace({
       setError(form.type === "fixed"
         ? "Enter a valid amount with the selected currency's precision."
         : "Enter a valid percentage with up to two decimal places.");
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[aria-label="Budget amount"], [aria-label="Budget percentage"]')?.focus());
       return;
     }
     if (form.interval === "bi-weekly" &&
@@ -209,6 +222,9 @@ export function BudgetWorkspace({
         !isDateOnly(form.biweeklyEndDate) ||
         form.biweeklyEndDate < form.biweeklyStartDate)) {
       setError("Choose a valid bi-weekly start and end date.");
+      if (typeof document !== "undefined") {
+        document.querySelector<HTMLInputElement>('[aria-label="Bi-weekly cycle start"]')?.focus();
+      }
       return;
     }
     const input: Omit<SaveBudgetInput, "operationId"> = {
@@ -235,6 +251,7 @@ export function BudgetWorkspace({
       onStateChange(result.state);
       setOperationAttempt(null);
       setForm(null);
+      budgetDrafts.delete(draftKey);
     } catch (failure) {
       setError((failure as Error).message);
     } finally {
@@ -270,6 +287,7 @@ export function BudgetWorkspace({
     setForm(null);
     setError("");
     setOperationAttempt(null);
+    budgetDrafts.delete(draftKey);
   }
 
   /** Render an accessible action with a real disabled state while saving.
@@ -278,20 +296,23 @@ export function BudgetWorkspace({
    * @param disabled - Whether the control is temporarily unavailable.
    * @returns Pressable button view.
    */
-  const button = (label: string, onPress: () => void, disabled = false) => (
+  const button = (label: string, onPress: () => void, disabled = false, secondary = false) => (
     <Pressable
       accessibilityRole="button"
       disabled={disabled}
       onPress={onPress}
-      style={[styles.button, disabled && styles.disabled]}
+      style={[secondary ? styles.secondaryButton : styles.button, disabled && styles.disabled]}
     >
-      <Text style={styles.buttonText}>{label}</Text>
+      <Text style={secondary ? styles.secondaryButtonText : styles.buttonText}>{label}</Text>
     </Pressable>
   );
 
   return (
     <View style={styles.content}>
-      <Text accessibilityRole="header" style={styles.heading}>Budgets</Text>
+      <Pressable accessibilityRole="button" onPress={onBack} style={styles.back}>
+        <Text style={styles.backText}>‹ Back to accounts</Text>
+      </Pressable>
+      <Text accessibilityRole="header" nativeID="route-heading" style={styles.heading}>Budgets</Text>
       <Text style={styles.note}>Category limits apply across all accounts.</Text>
       <Text style={styles.note}>Budget currency: {state.preferredCurrency ?? "unavailable"}</Text>
       <View style={styles.cyclePreference}>
@@ -333,12 +354,13 @@ export function BudgetWorkspace({
               <Pressable
                 key={type}
                 accessibilityRole="radio"
+                aria-checked={form.type === type}
                 accessibilityLabel={type === "fixed" ? "Fixed amount" : "Percentage of income"}
                 accessibilityState={{ checked: form.type === type }}
                 onPress={() => setForm({ ...form, type, amount: "0", rolloverEnabled: type === "fixed" && form.rolloverEnabled })}
                 style={[styles.option, form.type === type && styles.optionSelected]}
               >
-                <Text style={styles.label}>{type === "fixed" ? "Fixed amount" : "% of income"}</Text>
+                <Text style={styles.label}>{type === "fixed" ? "Fixed amount" : "% of income"}{form.type === type ? "  ✓" : ""}</Text>
               </Pressable>
             ))}
           </View>
@@ -347,11 +369,15 @@ export function BudgetWorkspace({
           </Text>
           <TextInput
             accessibilityLabel={form.type === "fixed" ? "Budget amount" : "Budget percentage"}
+            accessibilityHint={error.startsWith("Enter a valid amount") || error.startsWith("Enter a valid percentage") ? error : undefined}
             keyboardType="decimal-pad"
             value={form.amount}
-            onChangeText={(amount) => setForm({ ...form, amount })}
+            onChangeText={(amount) => { setForm({ ...form, amount }); if (error.startsWith("Enter a valid amount") || error.startsWith("Enter a valid percentage")) setError(""); }}
             style={styles.input}
           />
+          {error.startsWith("Enter a valid amount") || error.startsWith("Enter a valid percentage") ? (
+            <Text accessibilityRole="alert" style={styles.error}>{error}</Text>
+          ) : null}
           <Text style={styles.note}>Saving zero clears this category budget.</Text>
           <Text style={styles.label}>Budget period</Text>
           <View style={styles.periods}>
@@ -359,49 +385,61 @@ export function BudgetWorkspace({
               <Pressable
                 key={interval}
                 accessibilityRole="radio"
+                aria-checked={form.interval === interval}
                 accessibilityLabel={label}
                 accessibilityState={{ checked: form.interval === interval }}
                 onPress={() => setForm({ ...form, interval })}
                 style={[styles.period, form.interval === interval && styles.periodSelected]}
               >
-                <Text style={styles.periodText}>{label}</Text>
+                <Text style={styles.periodText}>{label}{form.interval === interval ? "  ✓" : ""}</Text>
               </Pressable>
             ))}
           </View>
           {form.interval === "bi-weekly" ? (
             <>
               <Text style={styles.label}>Bi-weekly cycle start</Text>
-              <TextInput
-                accessibilityLabel="Bi-weekly cycle start"
-                value={form.biweeklyStartDate}
-                onChangeText={changeBiweeklyStart}
-                placeholder="YYYY-MM-DD"
-                style={styles.input}
-              />
+              {createElement("input", {
+                "aria-label": "Bi-weekly cycle start",
+                "aria-describedby": error === "Choose a valid bi-weekly start and end date." ? "budget-date-error" : undefined,
+                "aria-invalid": error === "Choose a valid bi-weekly start and end date." ? "true" : undefined,
+                type: "date",
+                value: form.biweeklyStartDate,
+                onChange: (event: { currentTarget: { value: string } }) => { setError(""); changeBiweeklyStart(event.currentTarget.value); },
+                style: { boxSizing: "border-box", width: "100%", padding: 14, border: "1px solid var(--kuwi-border)", borderRadius: 12, fontSize: 17, color: ink, backgroundColor: "var(--kuwi-surface)" },
+              })}
               <Text style={styles.label}>Bi-weekly cycle end</Text>
-              <TextInput
-                accessibilityLabel="Bi-weekly cycle end"
-                value={form.biweeklyEndDate}
-                onChangeText={changeBiweeklyEnd}
-                placeholder="YYYY-MM-DD"
-                style={styles.input}
-              />
+              {createElement("input", {
+                "aria-label": "Bi-weekly cycle end",
+                "aria-describedby": error === "Choose a valid bi-weekly start and end date." ? "budget-date-error" : undefined,
+                "aria-invalid": error === "Choose a valid bi-weekly start and end date." ? "true" : undefined,
+                type: "date",
+                value: form.biweeklyEndDate,
+                onChange: (event: { currentTarget: { value: string } }) => { setError(""); changeBiweeklyEnd(event.currentTarget.value); },
+                style: { boxSizing: "border-box", width: "100%", padding: 14, border: "1px solid var(--kuwi-border)", borderRadius: 12, fontSize: 17, color: ink, backgroundColor: "var(--kuwi-surface)" },
+              })}
+              {error === "Choose a valid bi-weekly start and end date." ? (
+                <Text nativeID="budget-date-error" accessibilityRole="alert" style={styles.error}>{error}</Text>
+              ) : null}
             </>
           ) : null}
           {form.type === "fixed" ? (
             <Pressable
               accessibilityRole="checkbox"
+              aria-checked={form.rolloverEnabled}
               accessibilityLabel="Carry unused budget forward"
               accessibilityState={{ checked: form.rolloverEnabled }}
               onPress={() => setForm({ ...form, rolloverEnabled: !form.rolloverEnabled })}
               style={styles.checkbox}
             >
+              <View style={styles.checkMark} accessibilityElementsHidden>
+                {form.rolloverEnabled ? <Text style={styles.checkText}>✓</Text> : null}
+              </View>
               <Text style={styles.label}>Carry unused budget forward</Text>
             </Pressable>
           ) : null}
-          {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
+          {error && error !== "Choose a valid bi-weekly start and end date." && !error.startsWith("Enter a valid amount") && !error.startsWith("Enter a valid percentage") ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
           {button(saving ? "Saving…" : "Save budget", () => void saveBudget(), saving)}
-          {button("Cancel", cancelEdit, saving)}
+          {button("Cancel", cancelEdit, saving, true)}
         </View>
       ) : (
         <View style={styles.categories}>
@@ -436,13 +474,13 @@ export function BudgetWorkspace({
                     </Text>
                   </>
                 ) : null}
-                {button(budget ? `Edit ${category.label} budget` : `Set ${category.label} budget`, () => editBudget(category.id))}
+                {button(budget ? `Edit ${category.label} budget` : `Set ${category.label} budget`, () => editBudget(category.id), false, true)}
               </View>
             );
           })}
         </View>
       )}
-      {form ? null : button("Back to accounts", onBack)}
+      {form ? null : button("Back to accounts", onBack, false, true)}
     </View>
   );
 }
@@ -452,29 +490,35 @@ const styles = StyleSheet.create({
   heading: { color: ink, fontSize: 28, lineHeight: 34, fontWeight: "700" },
   subheading: { color: ink, fontSize: 21, lineHeight: 27, fontWeight: "700" },
   label: { color: ink, fontSize: 15, fontWeight: "600" },
-  note: { color: "#526355", fontSize: 13, lineHeight: 19 },
+  note: { color: "var(--kuwi-secondary-text)", fontSize: 13, lineHeight: 19 },
   summaryAmount: { color: ink, fontSize: 20, fontWeight: "700", fontVariant: ["tabular-nums"] },
-  summary: { gap: 6, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#d4ddcf" },
-  cyclePreference: { gap: 9, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#d4ddcf" },
-  cycleInput: { width: 112, padding: 12, borderWidth: 1, borderColor: "#83927e", borderRadius: 12, fontSize: 17, color: ink, backgroundColor: "#fffdf7" },
+  summary: { gap: 6, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "var(--kuwi-divider)" },
+  cyclePreference: { gap: 9, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "var(--kuwi-divider)" },
+  cycleInput: { width: 112, padding: 12, borderWidth: 1, borderColor: "var(--kuwi-border)", borderRadius: 12, fontSize: 17, color: ink, backgroundColor: "var(--kuwi-surface)" },
   categories: { gap: 14 },
-  category: { gap: 8, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: "#d4ddcf" },
+  category: { gap: 8, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: "var(--kuwi-divider)" },
   categoryHeading: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 10 },
   categoryAmount: { color: ink, fontSize: 14, fontWeight: "600", fontVariant: ["tabular-nums"] },
-  track: { height: 8, backgroundColor: "#e2e9d9", borderRadius: 8, overflow: "hidden" },
+  track: { height: 8, backgroundColor: "var(--kuwi-selected)", borderRadius: 8, overflow: "hidden" },
   fill: { height: "100%", backgroundColor: sage, borderRadius: 8 },
   form: { gap: 13 },
   options: { flexDirection: "row", gap: 8 },
-  option: { flex: 1, alignItems: "center", padding: 12, borderRadius: 11, borderWidth: 1, borderColor: "#83927e", backgroundColor: "#fffdf7" },
-  optionSelected: { borderColor: sage, borderWidth: 2, backgroundColor: "#e2e9d9" },
-  input: { padding: 14, borderWidth: 1, borderColor: "#83927e", borderRadius: 12, fontSize: 17, color: ink, backgroundColor: "#fffdf7" },
+  option: { flex: 1, alignItems: "center", padding: 12, borderRadius: 11, borderWidth: 1, borderColor: "var(--kuwi-border)", backgroundColor: "var(--kuwi-surface)" },
+  optionSelected: { borderColor: sage, borderWidth: 2, backgroundColor: "var(--kuwi-selected)" },
+  input: { padding: 14, borderWidth: 1, borderColor: "var(--kuwi-border)", borderRadius: 12, fontSize: 17, color: ink, backgroundColor: "var(--kuwi-surface)" },
   periods: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
-  period: { paddingVertical: 9, paddingHorizontal: 11, borderRadius: 10, borderWidth: 1, borderColor: "#83927e", backgroundColor: "#fffdf7" },
-  periodSelected: { borderColor: sage, backgroundColor: "#e2e9d9" },
+  period: { paddingVertical: 9, paddingHorizontal: 11, borderRadius: 10, borderWidth: 1, borderColor: "var(--kuwi-border)", backgroundColor: "var(--kuwi-surface)" },
+  periodSelected: { borderColor: sage, backgroundColor: "var(--kuwi-selected)" },
   periodText: { color: ink, fontSize: 13, fontWeight: "600" },
-  checkbox: { paddingVertical: 8 },
+  checkbox: { paddingVertical: 8, flexDirection: "row", alignItems: "center", gap: 10 },
+  checkMark: { width: 22, height: 22, borderWidth: 2, borderColor: sage, borderRadius: 5, backgroundColor: "var(--kuwi-surface)", alignItems: "center", justifyContent: "center" },
+  checkText: { color: ink, fontSize: 16, lineHeight: 18, fontWeight: "800" },
+  back: { alignSelf: "flex-start", paddingVertical: 7, paddingHorizontal: 10, borderRadius: 9, borderWidth: 1, borderColor: sage, backgroundColor: "var(--kuwi-surface)" },
+  backText: { color: ink, fontSize: 14, fontWeight: "600" },
   button: { alignSelf: "flex-start", paddingVertical: 10, paddingHorizontal: 13, borderRadius: 10, backgroundColor: sage },
   buttonText: { color: "#fff", fontSize: 14, fontWeight: "600" },
+  secondaryButton: { alignSelf: "flex-start", paddingVertical: 10, paddingHorizontal: 13, borderRadius: 10, borderWidth: 1, borderColor: sage, backgroundColor: "var(--kuwi-surface)" },
+  secondaryButtonText: { color: ink, fontSize: 14, fontWeight: "600" },
   disabled: { opacity: 0.5 },
-  error: { color: "#752e1a", padding: 12, borderRadius: 10, backgroundColor: "#fae7de" },
+  error: { color: "var(--kuwi-error-fg)", padding: 12, borderRadius: 10, backgroundColor: "var(--kuwi-error-bg)" },
 });

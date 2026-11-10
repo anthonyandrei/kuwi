@@ -74,11 +74,190 @@ async function finishSetup(page) {
  * @returns {Promise<void>} Resolves after the browser hands the file to the app.
  */
 async function restoreFile(page, file) {
+  const dataManagement = page.getByRole("button", { name: "Data management", exact: true });
+  if (await dataManagement.isVisible()) await dataManagement.click();
   const chooserPromise = page.waitForEvent("filechooser", { timeout: 5000 });
   await page.getByRole("button", { name: "Restore backup", exact: true }).click();
   const chooser = await chooserPromise;
   await chooser.setFiles(file);
+  const replace = page.getByRole("button", { name: "Replace local data", exact: true });
+  const alert = page.getByRole("alert");
+  await expect(replace.or(alert)).toBeVisible();
+  if (await replace.isVisible()) await replace.click();
 }
+
+async function openDataManagement(page) {
+  const button = page.getByRole("button", { name: "Data management", exact: true });
+  if (await button.isVisible()) await button.click();
+}
+
+test("workspace URLs follow browser history and keep an unfinished entry draft", async ({
+  browserName,
+  baseURL,
+}, testInfo) => {
+  const browserType = browserName === "webkit" ? webkit : chromium;
+  const directory = testInfo.outputPath("workspace-navigation-profile");
+  await rm(directory, { recursive: true, force: true });
+  const context = await browserType.launchPersistentContext(directory, { baseURL });
+  try {
+    const page = await context.newPage();
+    await finishSetup(page);
+    await page.getByRole("button", { name: "View account Cash", exact: true }).click();
+    await expect(page).toHaveURL(/view=account/);
+    await page.getByRole("button", { name: "Add expense", exact: true }).click();
+    await expect(page).toHaveURL(/view=expense/);
+    await page.getByLabel("Expense amount", { exact: true }).fill("25");
+    await page.getByLabel("Expense note", { exact: true }).fill("Keep this draft");
+
+    await page.goBack();
+    await expect(page).toHaveURL(/view=account/);
+    await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+    await page.goForward();
+    await expect(page).toHaveURL(/view=expense/);
+    await expect(page.getByLabel("Expense amount", { exact: true })).toHaveValue("25");
+    await expect(page.getByLabel("Expense note", { exact: true })).toHaveValue("Keep this draft");
+
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(page).toHaveURL(/view=account/);
+    await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+    await page.getByRole("button", { name: "Data management", exact: true }).click();
+    await expect(page).toHaveURL(/view=data-management/);
+    await page.reload();
+    await expect(page).toHaveURL(/view=data-management/);
+    await expect(page.getByRole("heading", { name: "Data management" })).toBeVisible();
+    await page.goto("/?view=account&accountId=missing-account");
+    await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
+    await expect(page).toHaveURL(/view=accounts/);
+  } finally {
+    await context.close();
+  }
+});
+
+test("system appearance changes live and narrow account rows stay within the viewport", async ({
+  browserName,
+  baseURL,
+}, testInfo) => {
+  const browserType = browserName === "webkit" ? webkit : chromium;
+  const directory = testInfo.outputPath("appearance-profile");
+  await rm(directory, { recursive: true, force: true });
+  const context = await browserType.launchPersistentContext(directory, { baseURL });
+  try {
+    const page = await context.newPage();
+    await finishSetup(page);
+    await page.setViewportSize({ width: 320, height: 800 });
+    await page.emulateMedia({ colorScheme: "dark" });
+
+    const measureContrast = (foreground, background) => {
+      const luminance = (color) => {
+        const channels = color.match(/[\d.]+/g).slice(0, 3).map(Number).map((channel) => {
+          const value = channel / 255;
+          return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+        });
+        return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+      };
+      const first = luminance(foreground);
+      const second = luminance(background);
+      return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+    };
+    const colors = async () => page.evaluate(() => {
+      const heading = document.querySelector('[role="heading"]');
+      const action = [...document.querySelectorAll('[role="button"]')].find((item) => item.textContent?.includes("Add account"));
+      const actionText = action?.querySelector('[dir="auto"]');
+      return {
+        page: getComputedStyle(document.body).backgroundColor,
+        heading: getComputedStyle(heading).color,
+        action: getComputedStyle(action).backgroundColor,
+        actionText: getComputedStyle(actionText).color,
+      };
+    });
+
+    let palette = await colors();
+    expect(palette.page).toBe("rgb(17, 26, 20)");
+    expect(measureContrast(palette.heading, palette.page)).toBeGreaterThanOrEqual(4.5);
+    expect(measureContrast(palette.actionText, palette.action)).toBeGreaterThanOrEqual(4.5);
+
+    await page.emulateMedia({ colorScheme: "light" });
+    await expect.poll(async () => (await colors()).page).toBe("rgb(249, 245, 235)");
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect.poll(async () => (await colors()).page).toBe("rgb(17, 26, 20)");
+
+    const addAccount = page.getByRole("button", { name: "Add account", exact: true });
+    await addAccount.hover();
+    await expect.poll(() => addAccount.evaluate((element) => getComputedStyle(element).filter))
+      .toBe("brightness(0.94)");
+    const buttonBox = await addAccount.boundingBox();
+    await page.mouse.move(buttonBox.x + buttonBox.width / 2, buttonBox.y + buttonBox.height / 2);
+    await page.mouse.down();
+    await expect.poll(() => addAccount.evaluate((element) => getComputedStyle(element).transform))
+      .not.toBe("none");
+    await page.mouse.up();
+
+    await page.getByLabel("Account name", { exact: true }).fill("Long household emergency account");
+    await page.getByLabel("Opening balance (PHP)", { exact: true }).fill("999999999.99");
+    await page.getByRole("button", { name: "Save account", exact: true }).click();
+    await expect(page.getByText("Long household emergency account", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱999,999,999.99", { exact: true })).toBeVisible();
+    const viewportWidth = await page.evaluate(() => ({
+      viewport: window.innerWidth,
+      page: document.documentElement.scrollWidth,
+    }));
+    expect(viewportWidth.page).toBeLessThanOrEqual(viewportWidth.viewport);
+
+    await page.getByRole("button", { name: "View account Long household emergency account", exact: true }).click();
+    await page.getByRole("button", { name: "Transaction history", exact: true }).click();
+    const backLinkColors = await page.getByText("Back to account", { exact: true }).evaluate((element) => ({
+      foreground: getComputedStyle(element).color,
+      background: getComputedStyle(document.body).backgroundColor,
+    }));
+    expect(measureContrast(backLinkColors.foreground, backLinkColors.background)).toBeGreaterThanOrEqual(4.5);
+  } finally {
+    await context.close();
+  }
+});
+
+test("selecting a backup reviews it before local data can be replaced", async ({
+  browserName,
+  baseURL,
+}, testInfo) => {
+  const browserType = browserName === "webkit" ? webkit : chromium;
+  const directory = testInfo.outputPath("backup-review-browser-profile");
+  await rm(directory, { recursive: true, force: true });
+  const context = await browserType.launchPersistentContext(directory, { baseURL });
+  try {
+    const page = await context.newPage();
+    await finishSetup(page);
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Data management", exact: true }).click();
+    await page.getByRole("button", { name: "Export backup", exact: true }).click();
+    const download = await downloadPromise;
+    const backup = await (await import("node:fs/promises")).readFile(await download.path());
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+
+    await page.getByRole("button", { name: "Add account", exact: true }).click();
+    await page.getByLabel("Account name", { exact: true }).fill("Reserve");
+    await page.getByRole("button", { name: "Save account", exact: true }).click();
+    await expect(page.getByText("Reserve", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Data management", exact: true }).click();
+    const chooserPromise = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "Restore backup", exact: true }).click();
+    const chooser = await chooserPromise;
+    await chooser.setFiles({ name: "candidate.kuwi.json", mimeType: "application/json", buffer: backup });
+
+    await expect(page.getByText("candidate.kuwi.json", { exact: true })).toBeVisible();
+    await expect(page.getByText("Accounts in backup: 1", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Exported/)).toBeVisible();
+    await expect(page.getByText(/replacing this browser's local data/i)).toBeVisible();
+    await page.getByRole("button", { name: "Cancel restore", exact: true }).click();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+
+    await expect(page.getByText("Reserve", { exact: true })).toBeVisible();
+    await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
 
 /** Recompute a test candidate's digest after an intentional data mutation.
  * @param {object} backup - Exported envelope to copy with a refreshed digest.
@@ -206,6 +385,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     const downloadPromise = page.waitForEvent("download");
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
     const download = await downloadPromise;
     const backupText = await (await import("node:fs/promises")).readFile(await download.path(), "utf8");
@@ -351,7 +531,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from("not a Kuwi backup"),
     });
     await expect(page.getByRole("alert")).toContainText("not valid JSON");
-    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱904.75")).toBeVisible();
 
     const broken = { ...backup, data: { ...backup.data, expenses: [] } };
     await restoreFile(page, {
@@ -360,7 +540,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(broken)),
     });
     await expect(page.getByRole("alert")).toContainText("integrity");
-    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱904.75")).toBeVisible();
 
     const badReference = structuredClone(backup);
     badReference.data.expenses[0].account_id = "missing-account";
@@ -370,7 +550,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(badReference))),
     });
     await expect(page.getByRole("alert")).toContainText("reference");
-    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱904.75")).toBeVisible();
 
     const orphanedOperation = structuredClone(backup);
     orphanedOperation.data.pendingTransactionOperations.find(
@@ -382,7 +562,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(orphanedOperation))),
     });
     await expect(page.getByRole("alert")).toContainText("transaction operation is orphaned");
-    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱904.75")).toBeVisible();
 
     const tamperedCreateReceipt = structuredClone(backup);
     tamperedCreateReceipt.data.pendingSyncOperations[0].request_fingerprint = "{}";
@@ -392,7 +572,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(tamperedCreateReceipt))),
     });
     await expect(page.getByRole("alert")).toContainText("expense create receipt is invalid");
-    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱904.75")).toBeVisible();
 
     const orphanedLog = structuredClone(backup);
     orphanedLog.data.pendingTransactionOperations.push({
@@ -409,7 +589,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(orphanedLog))),
     });
     await expect(page.getByRole("alert")).toContainText("transaction operation is orphaned");
-    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱904.75")).toBeVisible();
 
     const duplicateCurrency = structuredClone(backup);
     duplicateCurrency.data.currencies[1] = { ...duplicateCurrency.data.currencies[0] };
@@ -419,7 +599,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(duplicateCurrency))),
     });
     await expect(page.getByRole("alert")).toContainText("currencies contains duplicate code");
-    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱904.75")).toBeVisible();
 
     const futureExpense = structuredClone(backup);
     futureExpense.data.expenses[0].date = "9999-12-31";
@@ -429,7 +609,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(withValidDigest(futureExpense))),
     });
     await expect(page.getByRole("alert")).toContainText("expense date or planned flag is invalid");
-    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱904.75")).toBeVisible();
 
     const unsupported = { ...backup, version: 99 };
     await restoreFile(page, {
@@ -438,7 +618,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
       buffer: Buffer.from(JSON.stringify(unsupported)),
     });
     await expect(page.getByRole("alert")).toContainText("version");
-    await expect(page.getByText("₱904.75", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱904.75")).toBeVisible();
 
     const incomeOnlyBackup = structuredClone(backup);
     incomeOnlyBackup.schemaVersion = 4;
@@ -580,6 +760,7 @@ test("backup round trip rejects bad files and reopens offline with the restored 
 
     const restoredDownloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
     const restoredDownload = await restoredDownloadPromise;
     const restoredBackup = JSON.parse(await (await import("node:fs/promises")).readFile(await restoredDownload.path(), "utf8"));
@@ -644,6 +825,7 @@ test("restore rejects invalid cross-currency amounts and missing transfer receip
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     const downloadPromise = page.waitForEvent("download");
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
     const backup = JSON.parse(await (await import("node:fs/promises")).readFile(
       await (await downloadPromise).path(),
@@ -657,7 +839,7 @@ test("restore rejects invalid cross-currency amounts and missing transfer receip
       buffer: Buffer.from(JSON.stringify(withValidDigest(invalidAmount))),
     });
     await expect(page.getByRole("alert")).toContainText("received_amount_minor is invalid");
-    await expect(page.getByText("₱899.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱899.00")).toBeVisible();
 
     const missingReceipt = structuredClone(backup);
     missingReceipt.data.pendingTransferOperations = [];
@@ -667,7 +849,7 @@ test("restore rejects invalid cross-currency amounts and missing transfer receip
       buffer: Buffer.from(JSON.stringify(withValidDigest(missingReceipt))),
     });
     await expect(page.getByRole("alert")).toContainText("transfer is missing its pending operation");
-    await expect(page.getByText("₱899.00", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cash: ₱899.00")).toBeVisible();
   } finally {
     await context.close();
   }
@@ -705,6 +887,7 @@ test("a failed restore keeps saved transactions and their edit receipts", async 
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     const downloadPromise = page.waitForEvent("download");
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
     const download = await downloadPromise;
     const backupText = await (await import("node:fs/promises")).readFile(await download.path(), "utf8");
@@ -714,6 +897,8 @@ test("a failed restore keeps saved transactions and their edit receipts", async 
       buffer: Buffer.from(backupText),
     });
     await expect(page.getByRole("alert")).toContainText("Simulated restore write failure");
+    await page.getByRole("button", { name: "Cancel restore", exact: true }).click();
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
     await expect(page.getByText("₱988.00", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash", exact: true }).click();
     await page.getByRole("button", { name: "Transaction history", exact: true }).click();
@@ -721,6 +906,7 @@ test("a failed restore keeps saved transactions and their edit receipts", async 
     await page.getByRole("button", { name: "Back to account", exact: true }).click();
     await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
     const preservedDownloadPromise = page.waitForEvent("download");
+    await openDataManagement(page);
     await page.getByRole("button", { name: "Export backup", exact: true }).click();
     const preservedDownload = await preservedDownloadPromise;
     const preservedBackup = JSON.parse(await (await import("node:fs/promises")).readFile(await preservedDownload.path(), "utf8"));
@@ -729,6 +915,7 @@ test("a failed restore keeps saved transactions and their edit receipts", async 
       transaction_id: preservedBackup.data.expenses[0].id,
       operation_type: "edit",
     });
+    await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
 
     await page.getByRole("button", { name: "View account Cash", exact: true }).click();
     await page.getByRole("button", { name: "Add expense", exact: true }).click();

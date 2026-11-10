@@ -1340,6 +1340,19 @@ async function restoreBackup(backup) {
   return state();
 }
 
+/** Validate a candidate backup and return the details needed for its review screen.
+ * @param {unknown} backup - Parsed candidate file contents.
+ * @returns {Promise<{exportedAt: string, accountCount: number}>} Safe review details.
+ * @throws {Error} The candidate fails the same checks required for restoration.
+ */
+async function inspectBackup(backup) {
+  await validateBackup(backup);
+  return {
+    exportedAt: backup.exportedAt,
+    accountCount: backup.data.accounts.length,
+  };
+}
+
 /**
  * Return one account, all balances, canonical categories, transactions, and transfers.
  * Transfer rows include both currencies, their minor units, the rate, and linked source fee.
@@ -2050,6 +2063,7 @@ async function dispatch({ id, command, args = {} }) {
     else if (command === "deleteTransaction") result = await deleteTransaction(args);
     else if (command === "complete") result = await complete(args);
     else if (command === "exportBackup") result = await createBackup();
+    else if (command === "inspectBackup") result = await inspectBackup(args.backup);
     else if (command === "restoreBackup") result = await restoreBackup(args.backup);
     else if (command === "budgetState") result = budgetState();
     else if (command === "saveBudget") result = await saveBudget(args);

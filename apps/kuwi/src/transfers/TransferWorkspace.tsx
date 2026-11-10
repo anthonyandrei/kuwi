@@ -1,4 +1,4 @@
-import { createElement, useRef, useState } from "react";
+import { createElement, useEffect, useRef, useState } from "react";
 import {
   Pressable,
   StyleSheet,
@@ -20,8 +20,18 @@ import {
   validateTransferDate,
 } from "./entry";
 
-const ink = "#293c32";
-const sage = "#486b51";
+const ink = "var(--kuwi-ink)";
+const sage = "var(--kuwi-accent-button)";
+const accentText = "var(--kuwi-accent-text)";
+const transferDrafts = new Map<string, {
+  fromAccountId: string; toAccountId: string; amount: string; receivedAmount: string;
+  exchangeRate: string; conversionMode: "rate" | "received"; fee: string; note: string; date: string;
+}>();
+
+/** Discard every in-memory transfer draft after the ledger is replaced. */
+export function clearTransferDrafts(): void {
+  transferDrafts.clear();
+}
 
 /** Format a currency's integer minor units for the transfer form.
  * @param minor - Amount stored in the referenced currency's minor units.
@@ -43,7 +53,7 @@ function formatMoney(minor: number, currency: string, digits: number): string {
  * @param initialAccount - Account selected before opening this workspace.
  * @param onBack - Return without changing the ledger.
  * @param onTransfer - Publish the atomic result after storage confirms the save.
- * @returns The transfer form with eligible destinations, conversion entry, and source fee.
+ * @returns The transfer form with eligible destinations, conversion entry, and source fee; draft values survive same-session route changes.
  */
 export function TransferWorkspace({
   accounts,
@@ -56,22 +66,28 @@ export function TransferWorkspace({
   onBack: () => void;
   onTransfer: (result: CreateTransferResult) => void;
 }) {
+  const draftKey = initialAccount.id;
+  const savedDraft = transferDrafts.get(draftKey);
   const sources = accounts.filter((item) => ["debit", "credit"].includes(item.type));
-  const [fromAccountId, setFromAccountId] = useState(initialAccount.id);
+  const [fromAccountId, setFromAccountId] = useState(savedDraft?.fromAccountId ?? initialAccount.id);
   const selectedSource = sources.find((item) => item.id === fromAccountId) ?? sources[0];
   const destinations = accounts.filter((item) =>
     item.id !== selectedSource?.id && item.type === "debit",
   );
-  const [toAccountId, setToAccountId] = useState("");
+  const [toAccountId, setToAccountId] = useState(savedDraft?.toAccountId ?? "");
   const selectedDestination = destinations.find((item) => item.id === toAccountId) ?? destinations[0];
-  const [amount, setAmount] = useState("");
-  const [receivedAmount, setReceivedAmount] = useState("");
-  const [exchangeRate, setExchangeRate] = useState("1");
-  const [conversionMode, setConversionMode] = useState<"rate" | "received">("rate");
-  const [fee, setFee] = useState("");
-  const [note, setNote] = useState("");
-  const [date, setDate] = useState(getLocalDate());
+  const [amount, setAmount] = useState(savedDraft?.amount ?? "");
+  const [receivedAmount, setReceivedAmount] = useState(savedDraft?.receivedAmount ?? "");
+  const [exchangeRate, setExchangeRate] = useState(savedDraft?.exchangeRate ?? "1");
+  const [conversionMode, setConversionMode] = useState<"rate" | "received">(savedDraft?.conversionMode ?? "rate");
+  const [fee, setFee] = useState(savedDraft?.fee ?? "");
+  const [note, setNote] = useState(savedDraft?.note ?? "");
+  const [date, setDate] = useState(savedDraft?.date ?? getLocalDate());
   const [error, setError] = useState("");
+  const [fieldError, setFieldError] = useState<{
+    field: "amount" | "fee" | "rate" | "received" | "date";
+    message: string;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const operation = useRef<{ key: string; id: string } | null>(null);
   const sourceCurrency = selectedSource?.currency_code ?? initialAccount.currency_code;
@@ -109,6 +125,10 @@ export function TransferWorkspace({
       : Math.max(0, selectedSource.balance_minor)
     : 0;
 
+  useEffect(() => {
+    transferDrafts.set(draftKey, { fromAccountId, toAccountId, amount, receivedAmount, exchangeRate, conversionMode, fee, note, date });
+  }, [draftKey, fromAccountId, toAccountId, amount, receivedAmount, exchangeRate, conversionMode, fee, note, date]);
+
   /** Format stored minor units for a decimal input without rounding.
    * @param minor - Amount in the selected currency's minor units.
    * @param digits - Decimal places used by the selected currency.
@@ -139,23 +159,39 @@ export function TransferWorkspace({
       return;
     }
     const dateError = validateTransferDate(date);
-    if (dateError) return setError(dateError);
+    if (dateError) {
+      setError("");
+      setFieldError({ field: "date", message: dateError });
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[aria-label="Transfer date"]')?.focus());
+      return;
+    }
     if (sourceAmountMinor === null) {
       const fraction = amount.replace(/,/g, "").split(".")[1] ?? "";
-      setError(fraction.length > sourceDigits
+      const message = fraction.length > sourceDigits
         ? `Enter an amount with at most ${sourceDigits} decimal places.`
-        : "Enter a transfer amount greater than zero.");
+        : "Enter a transfer amount greater than zero.";
+      setError("");
+      setFieldError({ field: "amount", message });
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[aria-label="Transfer amount"]')?.focus());
       return;
     }
     const feeMinor = parseTransferFee(fee, sourceDigits);
     if (feeMinor === null) {
-      setError(`Enter a valid fee with at most ${sourceDigits} decimal places.`);
+      const message = `Enter a valid fee with at most ${sourceDigits} decimal places.`;
+      setError("");
+      setFieldError({ field: "fee", message });
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[aria-label="Transfer fee (optional)"]')?.focus());
       return;
     }
     if (receivedAmountMinor === null || effectiveRate === null || effectiveRate <= 0) {
-      setError("Enter a positive received amount and exchange rate.");
+      const field = conversionMode === "rate" ? "rate" : "received";
+      const message = "Enter a positive received amount and exchange rate.";
+      setError("");
+      setFieldError({ field, message });
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>(conversionMode === "rate" ? '[aria-label="Exchange rate"]' : '[aria-label^="Amount received"]')?.focus());
       return;
     }
+    setFieldError(null);
     const payload = {
       fromAccountId: selectedSource.id,
       toAccountId: selectedDestination.id,
@@ -174,6 +210,7 @@ export function TransferWorkspace({
     try {
       const result = await saveTransfer({ operationId: operation.current.id, ...payload });
       operation.current = null;
+      transferDrafts.delete(draftKey);
       onTransfer(result);
     } catch (failure) {
       setError((failure as Error).message);
@@ -187,11 +224,11 @@ export function TransferWorkspace({
     width: "100%",
     minHeight: 54,
     padding: 14,
-    border: "1px solid #83927e",
+    border: "1px solid var(--kuwi-border)",
     borderRadius: 14,
     fontSize: 17,
     color: ink,
-    backgroundColor: "#fffdf7",
+    backgroundColor: "var(--kuwi-surface)",
   };
   const sourceSelect = createElement(
     "select",
@@ -229,7 +266,7 @@ export function TransferWorkspace({
       <Pressable accessibilityRole="button" onPress={onBack} style={styles.back}>
         <Text style={styles.backText}>Back to account</Text>
       </Pressable>
-      <Text accessibilityRole="header" style={styles.title}>Transfer between accounts</Text>
+      <Text accessibilityRole="header" nativeID="route-heading" style={styles.title}>Transfer between accounts</Text>
       <Text style={styles.copy}>Enter the conversion rate manually. Kuwi saves transfers offline.</Text>
       {selectedSource ? (
         <View style={styles.available}>
@@ -237,7 +274,6 @@ export function TransferWorkspace({
           <Text style={styles.balance}>{formatMoney(available, sourceCurrency, sourceDigits)}</Text>
         </View>
       ) : null}
-      {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       {!destinations.length ? (
         <Text style={styles.hint}>Add a debit account to receive this transfer.</Text>
       ) : null}
@@ -248,57 +284,70 @@ export function TransferWorkspace({
       <Text style={styles.label}>Amount sent ({sourceCurrency})</Text>
       <TextInput
         accessibilityLabel="Transfer amount"
+        accessibilityHint={fieldError?.field === "amount" ? fieldError.message : undefined}
         value={amount}
-        onChangeText={(value) => setAmount(normalizeTransferInput(value, sourceDigits))}
+        onChangeText={(value) => { setAmount(normalizeTransferInput(value, sourceDigits)); if (fieldError?.field === "amount") setFieldError(null); }}
         keyboardType={sourceDigits === 0 ? "number-pad" : "decimal-pad"}
         placeholder="0"
         style={styles.input}
       />
+      {fieldError?.field === "amount" ? <Text accessibilityRole="alert" style={styles.error}>{fieldError.message}</Text> : null}
       {!sameCurrency ? (
         <>
           <Text style={styles.label}>Exchange rate (1 {sourceCurrency} in {destinationCurrency})</Text>
           <TextInput
             accessibilityLabel="Exchange rate"
+            accessibilityHint={fieldError?.field === "rate" ? fieldError.message : undefined}
             value={conversionMode === "rate" ? exchangeRate : effectiveRate?.toString() ?? ""}
             onChangeText={(value) => {
               setConversionMode("rate");
               setExchangeRate(cleanRateInput(value));
+              if (fieldError?.field === "rate") setFieldError(null);
             }}
             keyboardType="decimal-pad"
             placeholder="1"
             style={styles.input}
           />
+          {fieldError?.field === "rate" ? <Text accessibilityRole="alert" style={styles.error}>{fieldError.message}</Text> : null}
           <Text style={styles.label}>Amount received ({destinationCurrency})</Text>
           <TextInput
             accessibilityLabel={`Amount received (${destinationCurrency})`}
+            accessibilityHint={fieldError?.field === "received" ? fieldError.message : undefined}
             value={receivedText}
             onChangeText={(value) => {
               setConversionMode("received");
               setReceivedAmount(normalizeTransferInput(value, destinationDigits));
+              if (fieldError?.field === "received") setFieldError(null);
             }}
             keyboardType={destinationDigits === 0 ? "number-pad" : "decimal-pad"}
             placeholder="0"
             style={styles.input}
           />
+          {fieldError?.field === "received" ? <Text accessibilityRole="alert" style={styles.error}>{fieldError.message}</Text> : null}
         </>
       ) : null}
       <Text style={styles.label}>Fee ({sourceCurrency}, optional)</Text>
       <TextInput
         accessibilityLabel="Transfer fee (optional)"
+        accessibilityHint={fieldError?.field === "fee" ? fieldError.message : undefined}
         value={fee}
-        onChangeText={(value) => setFee(normalizeTransferInput(value, sourceDigits))}
+        onChangeText={(value) => { setFee(normalizeTransferInput(value, sourceDigits)); if (fieldError?.field === "fee") setFieldError(null); }}
         keyboardType={sourceDigits === 0 ? "number-pad" : "decimal-pad"}
         placeholder="0"
         style={styles.input}
       />
+      {fieldError?.field === "fee" ? <Text accessibilityRole="alert" style={styles.error}>{fieldError.message}</Text> : null}
       <Text style={styles.label}>Date</Text>
       {createElement("input", {
         "aria-label": "Transfer date",
+        "aria-describedby": fieldError?.field === "date" ? "transfer-date-error" : undefined,
+        "aria-invalid": fieldError?.field === "date" ? "true" : undefined,
         type: "date",
         value: date,
-        onChange: (event: { currentTarget: { value: string } }) => setDate(event.currentTarget.value),
+        onChange: (event: { currentTarget: { value: string } }) => { setDate(event.currentTarget.value); if (fieldError?.field === "date") setFieldError(null); },
         style: selectStyle,
       })}
+      {fieldError?.field === "date" ? <Text nativeID="transfer-date-error" accessibilityRole="alert" style={styles.error}>{fieldError.message}</Text> : null}
       <Text style={styles.label}>Note</Text>
       <TextInput
         accessibilityLabel="Transfer note"
@@ -320,6 +369,7 @@ export function TransferWorkspace({
           Total source deduction: {totalDeductionMinor === null ? "Enter a valid amount." : formatMoney(totalDeductionMinor, sourceCurrency, sourceDigits)}
         </Text>
       </View>
+      {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       <Pressable
         accessibilityRole="button"
         disabled={saving || !selectedDestination}
@@ -327,6 +377,20 @@ export function TransferWorkspace({
         style={[styles.saveButton, (saving || !selectedDestination) && styles.disabled]}
       >
         <Text style={styles.saveText}>{saving ? "Saving…" : "Save transfer"}</Text>
+      </Pressable>
+      <Pressable accessibilityRole="button" disabled={saving} onPress={() => {
+        transferDrafts.delete(draftKey);
+        setAmount("");
+        setReceivedAmount("");
+        setExchangeRate("1");
+        setFee("");
+        setNote("");
+        setDate(getLocalDate());
+        setError("");
+        setFieldError(null);
+        onBack();
+      }} style={styles.back}>
+        <Text style={styles.backText}>Cancel</Text>
       </Pressable>
       <Text style={styles.hint}>The transfer takes effect immediately, including for a future date. Fees are recorded as expenses in {sourceCurrency}.</Text>
     </View>
@@ -336,7 +400,7 @@ export function TransferWorkspace({
 const styles = StyleSheet.create({
   content: { gap: 16 },
   back: { alignSelf: "flex-start", minHeight: 44, justifyContent: "center" },
-  backText: { color: sage, fontSize: 15, fontWeight: "700" },
+  backText: { color: accentText, fontSize: 15, fontWeight: "700" },
   title: { color: ink, fontSize: 28, lineHeight: 34, fontWeight: "700" },
   copy: { color: ink, fontSize: 16, lineHeight: 24 },
   label: { color: ink, fontSize: 15, fontWeight: "700" },
@@ -344,11 +408,11 @@ const styles = StyleSheet.create({
     minHeight: 54,
     paddingHorizontal: 16,
     borderWidth: 1,
-    borderColor: "#83927e",
+    borderColor: "var(--kuwi-border)",
     borderRadius: 14,
     fontSize: 17,
     color: ink,
-    backgroundColor: "#fffdf7",
+    backgroundColor: "var(--kuwi-surface)",
   },
   saveButton: {
     minHeight: 54,
@@ -359,10 +423,10 @@ const styles = StyleSheet.create({
   },
   saveText: { color: "#ffffff", fontSize: 16, fontWeight: "700" },
   disabled: { opacity: 0.55 },
-  hint: { color: "#526355", fontSize: 13, lineHeight: 19 },
-  error: { padding: 14, borderRadius: 12, color: "#752e1a", backgroundColor: "#fae7de" },
-  available: { paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: "#d8dfd2", gap: 6 },
+  hint: { color: "var(--kuwi-secondary-text)", fontSize: 13, lineHeight: 19 },
+  error: { padding: 14, borderRadius: 12, color: "var(--kuwi-error-fg)", backgroundColor: "var(--kuwi-error-bg)" },
+  available: { paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: "var(--kuwi-divider)", gap: 6 },
   balance: { color: ink, fontSize: 26, fontWeight: "700" },
-  summary: { gap: 8, borderRadius: 14, backgroundColor: "#eef1e7", padding: 16 },
+  summary: { gap: 8, borderRadius: 14, backgroundColor: "var(--kuwi-soft)", padding: 16 },
   summaryText: { color: ink, fontSize: 14, lineHeight: 20 },
 });
