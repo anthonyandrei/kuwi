@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
-  Image,
   Modal,
   Pressable,
   ScrollView,
@@ -10,12 +9,14 @@ import {
   TextInput,
   View,
 } from "react-native";
+import Svg, { Circle, Path } from "react-native-svg";
 import Animated, { FadeIn, ReduceMotion, useReducedMotion } from "react-native-reanimated";
 import {
   closeDatabase,
   database,
   type Account,
   type BackupReview,
+  type HomeDashboard,
   type TransactionLedger,
   type ProductBackup,
   type BudgetState,
@@ -24,6 +25,9 @@ import {
 import { TransactionWorkspace, clearTransactionDrafts } from "../transactions/TransactionWorkspace";
 import { TransferWorkspace, clearTransferDrafts } from "../transfers/TransferWorkspace";
 import { BudgetWorkspace, clearBudgetDrafts } from "../budgets/BudgetWorkspace";
+import { HomeWorkspace } from "../home/HomeWorkspace";
+import { Quokka } from "../mascot/Quokka";
+import { WalletWorkspace } from "../wallet/WalletWorkspace";
 const currencies = [
   ["PHP", "Philippine Peso"],
   ["USD", "US Dollar"],
@@ -36,6 +40,39 @@ const cream = "var(--kuwi-page)",
   ink = "var(--kuwi-ink)",
   sage = "var(--kuwi-accent-button)",
   accentText = "var(--kuwi-accent-text)";
+
+/** Draw a compact icon for the main tabs and their selected state.
+ * @param name - Main workspace or add-action icon to render.
+ * @param selected - Whether to use the selected tab color.
+ */
+function NavigationIcon({
+  name,
+  selected = false,
+}: {
+  name: "home" | "wallet" | "budgets" | "add";
+  selected?: boolean;
+}) {
+  const stroke = selected ? accentText : "var(--kuwi-secondary-text)";
+  const paths = {
+    home: "M3 10 12 3l9 7M5.5 9v11h13V9M9.5 20v-7h5v7",
+    wallet: "M4 7a2 2 0 0 1 2-2h14v14H6a2 2 0 0 1-2-2zM4 8h16",
+    budgets: "M12 3a9 9 0 1 0 9 9M12 7v5l3 2",
+    add: "M12 5v14M5 12h14",
+  };
+  return (
+    <Svg width={20} height={20} viewBox="0 0 24 24" accessible={false}>
+      <Path
+        d={paths[name]}
+        fill="none"
+        stroke={stroke}
+        strokeWidth={1.8}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      {name === "wallet" ? <Circle cx={16} cy={13} r={1} fill={stroke} /> : null}
+    </Svg>
+  );
+}
 
 /** Return fraction digits for the currencies currently offered by Kuwi. */
 function decimalPlaces(currency: string) {
@@ -135,6 +172,11 @@ export default function Home() {
   const [operation, setOperation] = useState<{ key: string; id: string } | null>(null);
   const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
   const [transactionLedger, setTransactionLedger] = useState<TransactionLedger | null>(null);
+  const [homeDashboard, setHomeDashboard] = useState<HomeDashboard | null>(null);
+  const [celebrationId, setCelebrationId] = useState(0);
+  const [celebrationSeen, setCelebrationSeen] = useState(0);
+  const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+  const [quickAccountId, setQuickAccountId] = useState<string | null>(null);
   const [transactionMode, setTransactionMode] = useState<"expense" | "income" | "history" | null>(null);
   const [transferOpen, setTransferOpen] = useState(false);
   const [budgetState, setBudgetState] = useState<BudgetState | null>(null);
@@ -232,6 +274,7 @@ export default function Home() {
    * Reopen the worker and read canonical setup, updating saved data and phase.
    * Resolves after startup succeeds or its failure is displayed; callers reset
    * loading/error state before an explicit retry.
+   * @returns Resolves after setup is loaded or a read failure is displayed.
    */
   function load() {
     return closeDatabase()
@@ -280,7 +323,7 @@ export default function Home() {
       const account = currentSaved.accounts.find((item) => item.id === activeRoute.accountId);
       const view = activeRoute.view;
       const supportedViews = [
-        "accounts", "account", "new-account", "edit-account", "expense", "income",
+        "home", "accounts", "account", "new-account", "edit-account", "expense", "income",
         "history", "transaction-edit", "transfer", "budgets", "data-management",
         "troubleshooting", "backup-review",
       ];
@@ -290,6 +333,11 @@ export default function Home() {
       }
       const accountViews = ["account", "edit-account", "expense", "income", "history", "transaction-edit", "transfer"];
       setSelectedAccount(accountViews.includes(view) ? account ?? null : null);
+      if (view === "home") {
+        void database<HomeDashboard | null>("dashboard")
+          .then((dashboard) => setHomeDashboard(dashboard))
+          .catch((failure: Error) => setError(failure.message));
+      }
       if (!["accounts", "account", "new-account", "edit-account"].includes(view)) {
         setTransactionMode(null);
       }
@@ -392,7 +440,8 @@ export default function Home() {
   /**
    * Validate form text, save the account command, and reload committed SQLite state.
    * The operation ID survives a failed response while the normalized content is unchanged.
-   * Storage and validation errors stay visible in the form.
+   * Storage and validation errors stay visible in the form; success schedules a mascot reaction.
+   * @returns Resolves after validation, a save attempt, and any required state refresh.
    */
   async function saveAccount() {
     if (!saved || !accountForm) return;
@@ -434,6 +483,7 @@ export default function Home() {
     setError("");
     try {
       await database(command, { ...payload, operationId: operationKey });
+      setCelebrationId((current) => current + 1);
       const state = (await database("state")) as Setup | null;
       setSaved(state);
       if (selectedAccount) {
@@ -472,6 +522,34 @@ export default function Home() {
     } catch (failure) {
       setError((failure as Error).message);
     }
+  }
+  /** Load one account ledger before opening a Home shortcut or timeline entry.
+   * @param account - Saved account whose ledger will be opened.
+   * @param mode - Expense, income, or history workspace to open.
+   * @returns Resolves after opening the workspace or displaying a storage error.
+   */
+  async function openAccountWorkspace(account: Account, mode: "expense" | "income" | "history") {
+    setError("");
+    setQuickActionsOpen(false);
+    setSelectedAccount(account);
+    try {
+      const ledger = await database<TransactionLedger>("ledger", { accountId: account.id });
+      setTransactionLedger(ledger);
+      setTransactionMode(mode);
+      pushView(mode, account.id, mode);
+    } catch (failure) {
+      setError((failure as Error).message);
+    }
+  }
+  /** Open a selected account's transfer workspace from the compact Add menu.
+   * @param account - Source account selected in the Add menu.
+   */
+  function openAccountTransfer(account: Account) {
+    setQuickActionsOpen(false);
+    setSelectedAccount(account);
+    setTransactionMode(null);
+    setTransferOpen(true);
+    pushView("transfer", account.id);
   }
   /** Read canonical category budgets and derived progress before navigation.
    * @returns Resolves after opening the budget view or displaying a storage error.
@@ -644,12 +722,40 @@ export default function Home() {
       <Text style={appearance === "primary" ? s.buttonText : s.secondaryButtonText}>{label}</Text>
     </Pressable>
   );
+  const mainWorkspace = ["home", "accounts", "account"].includes(routeView);
+  const quickAccount = saved?.accounts.find((item) => item.id === quickAccountId) ?? null;
+  /** Push a main Home or Wallet route when it differs from the current route.
+   * @param view - Destination main workspace.
+   */
+  function navigateMain(view: "home" | "accounts") {
+    if (routeView !== view) pushView(view);
+  }
+  /** Open history for a saved account, returning to Wallet if its ID is stale.
+   * @param accountId - Account ID from a Home activity row.
+   */
+  function openHistory(accountId: string) {
+    const account = saved?.accounts.find((item) => item.id === accountId);
+    if (!account) {
+      setError("That account is no longer available. Choose another account.");
+      replaceView("accounts");
+      return;
+    }
+    void openAccountWorkspace(account, "history");
+  }
+  /** Record that a celebration ID has been shown so it does not replay on return.
+   * @param id - Increasing completed-action identifier.
+   */
+  const markCelebrationSeen = useCallback((id: number) => {
+    setCelebrationSeen((current) => Math.max(current, id));
+  }, []);
   return (
-    <ScrollView
-      contentContainerStyle={s.page}
-      keyboardShouldPersistTaps="handled"
-    >
-      <View style={s.shell}>
+    <View style={s.appFrame}>
+      <ScrollView
+        style={s.scroll}
+        contentContainerStyle={s.page}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={s.shell}>
         <Text style={s.brand}>kuwi</Text>
         {error && !accountForm && !backupCandidate && !dataManagementOpen && !troubleshootingOpen ? (
           <Text accessibilityRole="alert" style={s.error}>
@@ -711,6 +817,42 @@ export default function Home() {
             </View>
           </View>
         </Modal>
+        <Modal
+          visible={quickActionsOpen}
+          transparent
+          animationType={reduceMotion ? "none" : "slide"}
+          onRequestClose={() => setQuickActionsOpen(false)}
+        >
+          <View style={s.overlay}>
+            <View style={s.quickSheet}>
+              <Text style={s.sectionTitle}>Add to Kuwi</Text>
+              <Text style={s.note}>Choose an account for your next action.</Text>
+              <ScrollView style={s.quickAccounts} keyboardShouldPersistTaps="handled">
+                {saved?.accounts.map((item) => (
+                  <Pressable
+                    key={item.id}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: quickAccountId === item.id }}
+                    onPress={() => setQuickAccountId(item.id)}
+                    style={[s.quickAccount, quickAccountId === item.id && s.quickAccountSelected]}
+                  >
+                    <Text style={s.label}>{item.name}</Text>
+                    <Text style={s.note}>{item.type === "assets" ? "Assets" : item.type === "credit" ? "Credit" : "Debit"} · {item.currency_code}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+              {quickAccount ? (
+                <View style={s.quickActions}>
+                  {button("Add expense", () => void openAccountWorkspace(quickAccount, "expense"))}
+                  {quickAccount.type !== "assets" ? button("Add income", () => void openAccountWorkspace(quickAccount, "income"), false, "secondary") : null}
+                  {quickAccount.type !== "assets" ? button("Transfer between accounts", () => openAccountTransfer(quickAccount), false, "secondary") : null}
+                  {button("Transaction history", () => void openAccountWorkspace(quickAccount, "history"), false, "secondary")}
+                </View>
+              ) : null}
+              {button("Close", () => setQuickActionsOpen(false), false, "secondary")}
+            </View>
+          </View>
+        </Modal>
         {phase === "loading" ? (
           <Text style={s.copy}>Opening your local account…</Text>
         ) : phase === "error" || phase === "closed" ? (
@@ -731,8 +873,8 @@ export default function Home() {
           </View>
         ) : saved ? (
           <View style={s.content}>
-            <Text style={s.title}>Welcome, {saved.preferred_name}.</Text>
-            {!transferOpen && !budgetOpen && !transactionMode && !accountForm
+            {!mainWorkspace ? <Text style={s.title}>Welcome, {saved.preferred_name}.</Text> : null}
+            {!mainWorkspace && !transferOpen && !budgetOpen && !transactionMode && !accountForm
               ? button("Budgets", () => void openBudgetWorkspace())
               : null}
             {budgetOpen && budgetState && routeView === "budgets" ? (
@@ -747,6 +889,7 @@ export default function Home() {
                 initialAccount={selectedAccount}
                 onBack={() => { setTransferOpen(false); backTo("account", selectedAccount.id); }}
                 onTransfer={(result) => {
+                  setCelebrationId((current) => current + 1);
                   setSaved((current) => current ? { ...current, accounts: result.accounts } : current);
                   setSelectedAccount(result.ledger.account);
                   setTransactionLedger(result.ledger);
@@ -766,6 +909,7 @@ export default function Home() {
                 }}
                 onBack={() => { setTransactionMode(null); backTo("account", selectedAccount?.id); }}
                 onLedgerChange={(next) => {
+                  setCelebrationId((current) => current + 1);
                   setTransactionLedger(next);
                   setSelectedAccount(next.account);
                   setSaved((current) => current ? {
@@ -948,7 +1092,16 @@ export default function Home() {
                   backTo(returnToAccount ? "account" : "accounts", returnToAccount ? selectedAccount?.id : undefined);
                 }, saving, "secondary")}
               </View>
-            ) : selectedAccount ? (
+            ) : routeView === "home" ? homeDashboard ? (
+              <HomeWorkspace
+                dashboard={homeDashboard}
+                celebrationId={celebrationId > celebrationSeen ? celebrationId : 0}
+                onOpenHistory={openHistory}
+                onAddExpense={(account) => void openAccountWorkspace(account, "expense")}
+                onReactionShown={markCelebrationSeen}
+              />
+            ) : <Text style={s.copy}>Loading your activity…</Text>
+            : selectedAccount ? (
               <View style={s.accountDetails}>
                 <Text accessibilityRole="header" nativeID="route-heading" style={s.sectionTitle}>
                   {selectedAccount.name}
@@ -979,44 +1132,18 @@ export default function Home() {
                 {button("Edit account details", () => editAccount(selectedAccount), false, "secondary")}
               </View>
             ) : (
-              <View style={s.accounts}>
-                <Text accessibilityRole="header" nativeID="route-heading" style={s.sectionTitle}>Your accounts</Text>
+              <>
                 {backupMessage ? <Text accessibilityRole="status" style={s.success}>{backupMessage}</Text> : null}
-                {(saved.accounts || []).map((account) => (
-                  <View key={account.id} style={s.account}>
-                    <View style={s.accountHeading}>
-                      <View style={s.accountCopy}>
-                        <Text style={s.label}>{account.name}</Text>
-                        <Text style={s.note}>{account.type === "assets" ? "Assets" : account.type === "credit" ? "Credit" : "Debit"} / {account.currency_code}</Text>
-                      </View>
-                      <Text style={s.accountBalance}>{formatMoney(account.balance_minor, account.currency_code)}</Text>
-                    </View>
-                    {account.type === "credit" && account.credit_limit_minor !== null ? (
-                      <Text style={s.note}>Credit limit {formatMoney(account.credit_limit_minor, account.currency_code)}</Text>
-                    ) : null}
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`View account ${account.name}`}
-                      onPress={() => { setSelectedAccount(account); pushView("account", account.id); }}
-                      style={s.editButton}
-                    >
-                      <Text style={s.editButtonText}>View account</Text>
-                    </Pressable>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={`Edit account ${account.name}`}
-                      onPress={() => editAccount(account)}
-                      style={s.editButton}
-                    >
-                      <Text style={s.editButtonText}>Edit account</Text>
-                    </Pressable>
-                  </View>
-                ))}
-                {button("Add account", () => editAccount())}
-                <Text style={s.note}>Saved on this device. No sign-in required.</Text>
-                {button("Data management", () => { setDataManagementOpen(true); pushView("data-management"); }, false, "secondary")}
-                {button("Database troubleshooting", () => { setTroubleshootingOpen(true); pushView("troubleshooting"); }, false, "secondary")}
-              </View>
+                <WalletWorkspace
+                  accounts={saved.accounts}
+                  formatMoney={formatMoney}
+                  onOpenAccount={(account) => { setSelectedAccount(account); pushView("account", account.id); }}
+                  onEditAccount={(account) => editAccount(account)}
+                  onAddAccount={() => editAccount()}
+                  onOpenDataManagement={() => { setDataManagementOpen(true); pushView("data-management"); }}
+                  onOpenTroubleshooting={() => { setTroubleshootingOpen(true); pushView("troubleshooting"); }}
+                />
+              </>
             )}
           </View>
         ) : (
@@ -1030,11 +1157,9 @@ export default function Home() {
                 accessibilityLabel="Wake Kuwi"
                 onPress={() => setAwake(true)}
               >
-                <Image
-                  source={{ uri: "/quokka.png" }}
-                  style={s.mascot}
-                  accessibilityLabel="Kuwi the quokka"
-                />
+                <View style={s.mascot}>
+                  <Quokka pose={awake ? "greeting" : "idle"} active reduceMotion={reduceMotion} />
+                </View>
               </Pressable>
               {step === 0 ? (
                 <Text style={s.mascotHint}>
@@ -1161,11 +1286,34 @@ export default function Home() {
             )}
           </View>
         )}
-      </View>
-    </ScrollView>
+        </View>
+      </ScrollView>
+      {saved && mainWorkspace && phase === "ready" && !accountForm && !transactionMode && !transferOpen && !budgetOpen ? (
+        <View accessibilityRole="tablist" style={s.bottomNav}>
+          <Pressable accessibilityRole="tab" accessibilityState={{ selected: routeView === "home" }} onPress={() => navigateMain("home")} style={[s.navItem, routeView === "home" && s.navItemSelected]}>
+            <NavigationIcon name="home" selected={routeView === "home"} />
+            <Text style={[s.navLabel, routeView === "home" && s.navLabelSelected]}>Home</Text>
+          </Pressable>
+          <Pressable accessibilityRole="tab" accessibilityState={{ selected: routeView === "accounts" || routeView === "account" }} onPress={() => navigateMain("accounts")} style={[s.navItem, (routeView === "accounts" || routeView === "account") && s.navItemSelected]}>
+            <NavigationIcon name="wallet" selected={routeView === "accounts" || routeView === "account"} />
+            <Text style={[s.navLabel, (routeView === "accounts" || routeView === "account") && s.navLabelSelected]}>Wallet</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" onPress={() => void openBudgetWorkspace()} style={s.navItem}>
+            <NavigationIcon name="budgets" />
+            <Text style={s.navLabel}>Budgets</Text>
+          </Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Add transaction or transfer" onPress={() => { setQuickAccountId(null); setQuickActionsOpen(true); }} style={[s.navItem, s.addNavItem]}>
+            <NavigationIcon name="add" selected />
+            <Text style={[s.navLabel, s.navLabelSelected]}>Add</Text>
+          </Pressable>
+        </View>
+      ) : null}
+    </View>
   );
 }
 const s = StyleSheet.create({
+  appFrame: { flex: 1, minHeight: "100%", backgroundColor: cream },
+  scroll: { flex: 1 },
   overlay: {
     flex: 1,
     justifyContent: "flex-end",
@@ -1181,7 +1329,7 @@ const s = StyleSheet.create({
   },
   keys: { flexDirection: "row", flexWrap: "wrap" },
   key: { width: "33.33%", padding: 16, alignItems: "center" },
-  page: { flexGrow: 1, backgroundColor: cream, paddingHorizontal: 24, paddingTop: "max(24px, env(safe-area-inset-top))", paddingBottom: "max(32px, env(safe-area-inset-bottom))", paddingLeft: "max(24px, env(safe-area-inset-left))", paddingRight: "max(24px, env(safe-area-inset-right))" },
+  page: { flexGrow: 1, backgroundColor: cream, paddingHorizontal: 24, paddingTop: "max(24px, env(safe-area-inset-top))", paddingBottom: 24, paddingLeft: "max(20px, env(safe-area-inset-left))", paddingRight: "max(20px, env(safe-area-inset-right))" },
   shell: {
     width: "100%",
     maxWidth: 480,
@@ -1265,4 +1413,15 @@ const s = StyleSheet.create({
   currencyOption: { minWidth: 54, alignItems: "center", paddingVertical: 10, paddingHorizontal: 12, borderRadius: 11, borderWidth: 1, borderColor: "var(--kuwi-border)", backgroundColor: "var(--kuwi-surface)" },
   lockedInput: { opacity: 0.65, backgroundColor: "var(--kuwi-selected)" },
   balance: { fontSize: 36, fontWeight: "600", color: ink },
+  quickSheet: { maxHeight: "82%", padding: 22, gap: 14, paddingBottom: "max(22px, env(safe-area-inset-bottom))", borderTopLeftRadius: 24, borderTopRightRadius: 24, backgroundColor: cream },
+  quickAccounts: { flexShrink: 1, minHeight: 50 },
+  quickAccount: { padding: 14, marginBottom: 8, gap: 4, borderRadius: 14, backgroundColor: "var(--kuwi-surface)" },
+  quickAccountSelected: { borderWidth: 2, borderColor: sage, backgroundColor: "var(--kuwi-selected)" },
+  quickActions: { gap: 8 },
+  bottomNav: { flexDirection: "row", justifyContent: "space-around", alignItems: "center", gap: 4, paddingTop: 8, paddingBottom: "max(8px, env(safe-area-inset-bottom))", paddingLeft: "max(12px, env(safe-area-inset-left))", paddingRight: "max(12px, env(safe-area-inset-right))", borderTopWidth: 1, borderTopColor: "var(--kuwi-divider)", backgroundColor: "var(--kuwi-surface)" },
+  navItem: { flex: 1, minWidth: 52, minHeight: 52, alignItems: "center", justifyContent: "center", gap: 1, borderRadius: 14 },
+  navItemSelected: { backgroundColor: "var(--kuwi-selected)" },
+  navLabel: { color: "var(--kuwi-secondary-text)", fontSize: 11, lineHeight: 15, fontWeight: "600" },
+  navLabelSelected: { color: ink, fontWeight: "700" },
+  addNavItem: { backgroundColor: "var(--kuwi-selected)" },
 });

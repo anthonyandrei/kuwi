@@ -344,10 +344,9 @@ test("a populated legacy build updates on the same origin and reopens offline", 
   browserName,
   baseURL,
   storageFault,
-}, testInfo) => {
+}) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
-  const profile = testInfo.outputPath("legacy-update-profile");
-  await rm(profile, { recursive: true, force: true });
+  const profile = await mkdtemp(join(tmpdir(), "kuwi-legacy-update-"));
   const context = await browserType.launchPersistentContext(
     profile,
     { baseURL },
@@ -367,7 +366,9 @@ test("a populated legacy build updates on the same origin and reopens offline", 
     storageFault.legacyBuild = false;
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
-    await expect(page.getByText("Welcome, Anthony.", { exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "Home", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Welcome, Anthony." })).toBeVisible();
+    await page.getByRole("tab", { name: "Wallet", exact: true }).click();
     await expect(page.getByText("₱1,234.56", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash" }).click();
     await page.getByRole("button", { name: "Add expense" }).click();
@@ -399,7 +400,11 @@ test("a populated legacy build updates on the same origin and reopens offline", 
     await expect(page.getByText("After legacy update", { exact: true })).toBeVisible();
     await expect(page.getByText("Offline after legacy update", { exact: true })).toBeVisible();
   } finally {
-    await context.close();
+    try {
+      await context.close();
+    } finally {
+      await rm(profile, { recursive: true, force: true });
+    }
   }
 });
 
@@ -407,10 +412,9 @@ test("a legacy expense and backup survive the shell update", async ({
   browserName,
   baseURL,
   storageFault,
-}, testInfo) => {
+}) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
-  const profile = testInfo.outputPath("legacy-expense-update-profile");
-  await rm(profile, { recursive: true, force: true });
+  const profile = await mkdtemp(join(tmpdir(), "kuwi-legacy-expense-"));
   const context = await browserType.launchPersistentContext(
     profile,
     { baseURL },
@@ -523,7 +527,11 @@ test("a legacy expense and backup survive the shell update", async ({
     await page.getByRole("button", { name: "Transaction history" }).click();
     await expect(page.getByText("Legacy coffee", { exact: true })).toBeVisible();
   } finally {
-    await context.close();
+    try {
+      await context.close();
+    } finally {
+      await rm(profile, { recursive: true, force: true });
+    }
   }
 });
 

@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test as base, expect, webkit, chromium } from "@playwright/test";
 
 const test = base.extend({
@@ -326,10 +328,9 @@ function canonicalJson(value) {
 test("backup round trip rejects bad files and reopens offline with the restored ledger", async ({
   browserName,
   baseURL,
-}, testInfo) => {
+}) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
-  const directory = testInfo.outputPath("backup-browser-profile");
-  await rm(directory, { recursive: true, force: true });
+  const directory = await mkdtemp(join(tmpdir(), "kuwi-backup-roundtrip-"));
   let context = await browserType.launchPersistentContext(directory, { baseURL });
   try {
     let page = await context.newPage();
@@ -795,7 +796,11 @@ test("backup round trip rejects bad files and reopens offline with the restored 
     await expect(page.getByText("Bank transfer fee to Reserve", { exact: true })).toBeVisible();
     await expect(page.getByText("Offline tea", { exact: true })).toBeVisible();
   } finally {
-    await context.close();
+    try {
+      await context.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 });
 

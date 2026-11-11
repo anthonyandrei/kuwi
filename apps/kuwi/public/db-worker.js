@@ -551,6 +551,54 @@ function state() {
   return first ? { ...first, accounts: accountList() } : null;
 }
 
+/** Read Home data from canonical records without storing derived totals.
+ * @returns {object|null} Profile calendar settings and account, category, transaction, and transfer rows; null before setup.
+ */
+function dashboard() {
+  const profile = rows("SELECT p.preferred_name, p.preferred_currency, p.monthly_cycle_start_day FROM profiles p JOIN setup s ON s.profile_id=p.id WHERE s.id=1")[0];
+  if (!profile) return null;
+  return {
+    ...profile,
+    accounts: accountList(),
+    expense_categories: rows("SELECT id, label FROM categories ORDER BY sort_order, label"),
+    income_categories: rows("SELECT id, label FROM income_categories ORDER BY sort_order, label"),
+    transactions: rows(`
+      SELECT 'expense' AS kind, e.id, e.account_id, a.name AS account_name,
+        a.currency_code, currency.decimal_places, e.category_id, category.label AS category_label,
+        e.amount_minor, e.date, e.note, e.created_at, e.planned, e.planned_amount_minor,
+        e.transfer_id
+      FROM expenses e JOIN accounts a ON a.id=e.account_id
+      JOIN currencies currency ON currency.code=a.currency_code
+      JOIN categories category ON category.id=e.category_id
+      UNION ALL
+      SELECT 'income' AS kind, i.id, i.account_id, a.name AS account_name,
+        a.currency_code, currency.decimal_places, i.category_id, category.label AS category_label,
+        i.amount_minor, i.date, i.note, i.created_at, i.planned, i.planned_amount_minor,
+        NULL AS transfer_id
+      FROM incomes i JOIN accounts a ON a.id=i.account_id
+      JOIN currencies currency ON currency.code=a.currency_code
+      LEFT JOIN income_categories category ON category.id=i.category_id
+      ORDER BY 10 DESC, 12 DESC, 2 DESC
+    `),
+    transfers: rows(`
+      SELECT t.id, source.name AS from_account_name, destination.name AS to_account_name,
+        t.from_account_id, t.to_account_id, t.amount_minor, t.received_amount_minor,
+        t.exchange_rate, source.currency_code AS from_currency_code,
+        sourceCurrency.decimal_places AS from_decimal_places,
+        destination.currency_code AS to_currency_code,
+        destinationCurrency.decimal_places AS to_decimal_places,
+        t.date, t.note, t.created_at, COALESCE(fee.amount_minor,0) AS fee_amount_minor
+      FROM transfers t
+      JOIN accounts source ON source.id=t.from_account_id
+      JOIN accounts destination ON destination.id=t.to_account_id
+      JOIN currencies sourceCurrency ON sourceCurrency.code=source.currency_code
+      JOIN currencies destinationCurrency ON destinationCurrency.code=destination.currency_code
+      LEFT JOIN expenses fee ON fee.transfer_id=t.id
+      ORDER BY t.date DESC, t.created_at DESC, t.id DESC
+    `),
+  };
+}
+
 /** Read budget definitions and derive progress using the profile's monthly cycle day.
  * @returns {object} Preferred currency, cycle day from 1 through 31, categories, budget progress, and summary; before setup the currency is null and cycle day is 1.
  * Cross-currency totals are unavailable because this store has no FX quote source.
@@ -2054,6 +2102,7 @@ async function dispatch({ id, command, args = {} }) {
     if (command === "state") result = state();
     else if (command === "accounts") result = accountList();
     else if (command === "ledger") result = readLedger(args.accountId);
+    else if (command === "dashboard") result = dashboard();
     else if (command === "account.create") result = await createAccount(args);
     else if (command === "account.update") result = await updateAccount(args);
     else if (command === "createExpense") result = createExpense(args);

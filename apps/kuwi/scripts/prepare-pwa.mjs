@@ -6,7 +6,7 @@ import {
   mkdir,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { createHash } from "node:crypto";
 const require = createRequire(import.meta.url);
 const sqlite = dirname(require.resolve("@sqlite.org/sqlite-wasm/package.json"));
@@ -37,9 +37,14 @@ const files = await inventory("dist");
 const hash = createHash("sha256");
 for (const file of files) hash.update(await readFile(file));
 const cache = "kuwi-shell-" + hash.digest("hex").slice(0, 16);
+/** Convert a platform filesystem path beneath dist into a root-relative web URL.
+ * @param {string} file - Inventory path beginning with the `dist` directory.
+ * @returns {string} URL path with forward slashes for the service-worker cache.
+ */
+const toWebPath = (file) => "/" + file.slice(5).split(sep).join("/");
 await writeFile(
   "dist/sw.js",
-  `const CACHE=${JSON.stringify(cache)}, FILES=${JSON.stringify(["/", ...files.map((f) => "/" + f.slice(5))])};
+  `const CACHE=${JSON.stringify(cache)}, FILES=${JSON.stringify(["/", ...files.map(toWebPath)])};
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES))));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith('kuwi-shell-')&&key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
 self.addEventListener('fetch',event=>{if(event.request.method!=='GET'||new URL(event.request.url).origin!==self.location.origin)return;event.respondWith(caches.open(CACHE).then(async cache=>(await cache.match(event.request))||(event.request.mode==='navigate'?(await cache.match('/')):null)||fetch(event.request)));});

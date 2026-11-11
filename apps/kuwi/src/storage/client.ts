@@ -43,6 +43,39 @@ export type TransactionLedger = {
   transactions: TransactionRecord[];
   transfers: TransferRecord[];
 };
+export type DashboardTransaction = TransactionRecord & {
+  account_name: string;
+  currency_code: string;
+  decimal_places: number;
+};
+export type DashboardTransfer = {
+  id: string;
+  from_account_id: string;
+  from_account_name: string;
+  to_account_id: string;
+  to_account_name: string;
+  amount_minor: number;
+  received_amount_minor: number;
+  exchange_rate: string;
+  from_currency_code: string;
+  from_decimal_places: number;
+  to_currency_code: string;
+  to_decimal_places: number;
+  date: string;
+  note: string | null;
+  created_at: string;
+  fee_amount_minor: number;
+};
+export type HomeDashboard = {
+  preferred_name: string;
+  preferred_currency: string;
+  monthly_cycle_start_day: number;
+  accounts: Account[];
+  expense_categories: ExpenseCategory[];
+  income_categories: IncomeCategory[];
+  transactions: DashboardTransaction[];
+  transfers: DashboardTransfer[];
+};
 export type TransferRecord = {
   id: string;
   operation_id: string;
@@ -298,6 +331,7 @@ export type DatabaseResult =
   | Account[]
   | Account
   | TransactionLedger
+  | HomeDashboard
   | CreateTransactionResult
   | CreateExpenseResult
   | CreateTransferResult
@@ -313,6 +347,7 @@ type DatabaseCommand =
   | "account.update"
   | "complete"
   | "ledger"
+  | "dashboard"
   | "createExpense"
   | "createIncome"
   | "createTransfer"

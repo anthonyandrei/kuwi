@@ -183,9 +183,9 @@ test("budget type, period, and rollover expose and retain their selected states"
 test("budget progress follows corrected expenses, income, and transfer fees after offline reopening and restore", async ({
   browserName,
   baseURL,
-}, testInfo) => {
+}) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
-  const directory = testInfo.outputPath("budget-browser-profile");
+  const directory = await mkdtemp(join(tmpdir(), "kuwi-budget-browser-"));
   let context = await browserType.launchPersistentContext(directory, { baseURL });
   try {
     let page = await context.newPage();
@@ -322,7 +322,11 @@ test("budget progress follows corrected expenses, income, and transfer fees afte
     await openBudgets(page);
     await expect(page.getByText("2% used")).toBeVisible();
   } finally {
-    await context.close();
+    try {
+      await context.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 });
 

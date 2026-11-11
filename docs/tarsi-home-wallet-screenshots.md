@@ -45,3 +45,34 @@ and period controls inform spending discovery for #10; neither is evidence
 of a budget creation or progress screen. Recurring automation and forecasting
 remain outside the accepted implementation scope until separately specified.
 Kuwi retains its cream/sage palette and own quokka artwork.
+
+## Public site inspection, 2026-11-12
+
+The [Tarsi landing page](https://www.tarsi.cloud/) shows a warm brown mascot
+with large glossy eyes, strong outlines, shaded fur, and a green outfit. The
+page uses a light background and gives the character a wave. Kuwi's quokka is
+original artwork that uses those broad finish cues while keeping Kuwi's sage
+clothing and round quokka ears. The [features page](https://www.tarsi.cloud/features),
+[guide](https://www.tarsi.cloud/guide), and published demo video show the
+Home overview and grouped account cards. The video establishes their visible
+sequence and motion; it does not establish group persistence or calculation
+rules.
+
+The Home Day, Week, and Month controls use the documented Tarsi budget period
+boundaries in [the behavior reference](tarsi-behavior-reference.md#category-budgets):
+the browser's local day, Monday through Sunday, and the saved monthly cycle
+start day clamped to each month's length. The reference verifies those rules
+for budgets. Reusing them for Home is a Kuwi product decision, not evidence
+that Tarsi Home uses those same formulas. Home totals include posted income
+and expenses from the chosen currency. Planned rows remain in the recent
+timeline with a Planned label. Category totals use posted expenses, including
+linked transfer fees. Transfer principal appears in the timeline without
+changing income or expense totals. These inclusion rules follow Kuwi's saved
+records and keep currency totals separate; the static reference does not
+confirm Tarsi's chart formulas.
+
+Wallet groups are names Anthony chooses. Existing accounts stay in Other
+accounts until he moves them. Group names, assignments, collapsed sections,
+and balance visibility are local display preferences. They are separate from
+finance records and are not included in finance backups. The reference does not
+show whether Tarsi persists these controls or how its overflow actions work.

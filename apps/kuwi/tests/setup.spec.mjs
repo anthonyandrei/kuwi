@@ -182,7 +182,7 @@ test("a quota failure stays visible and reopening keeps the saved account", asyn
   await expect(page.getByRole("alert")).toContainText("Storage quota exceeded");
 
   await page.getByRole("button", { name: "Retry opening", exact: true }).click();
-  await expect(page.getByText("Welcome, Anthony.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
   await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
 });
 /**
@@ -275,7 +275,7 @@ test("setup persists offline and hands ownership to another tab", async ({
   const reopened = await context.newPage();
   await reopened.goto("/");
   await expect(
-    reopened.getByText("Welcome, Anthony.", { exact: true }),
+    reopened.getByRole("heading", { name: "Your accounts" }),
   ).toBeVisible();
   await expect(reopened.getByText("₱1,234.56", { exact: true })).toBeVisible();
 });
@@ -332,13 +332,9 @@ test("failed setup writes roll back and retry saves one account", async ({
   await page
     .getByRole("button", { name: "Save my account", exact: true })
     .click();
-  await expect(
-    page.getByText("Welcome, Anthony.", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
   await page.reload();
-  await expect(
-    page.getByText("Welcome, Anthony.", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
 });
 
 test("lost save reply exposes retry and returns the committed setup", async ({
@@ -404,17 +400,16 @@ test("setup retry rejects the same operation ID with different details", async (
 
   expect(response.error).toContain("already used for different account details");
   await page.getByRole("button", { name: "Retry opening", exact: true }).click();
-  await expect(page.getByText("Welcome, Anthony.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
   await expect(page.getByText("₱25.00", { exact: true })).toBeVisible();
 });
 
 test("saved setup reopens offline after full browser closure", async ({
   browserName,
   baseURL,
-}, testInfo) => {
+}) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
-  const directory = testInfo.outputPath("browser-profile");
-  await rm(directory, { recursive: true, force: true });
+  const directory = await mkdtemp(join(tmpdir(), "kuwi-setup-browser-"));
   let context = await browserType.launchPersistentContext(directory, {
     baseURL,
   });
@@ -438,12 +433,14 @@ test("saved setup reopens offline after full browser closure", async ({
     });
     page = await context.newPage();
     await page.goto("/");
-    await expect(
-      page.getByText("Welcome, Anthony.", { exact: true }),
-    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
     await expect(page.getByText("₱1,234.56", { exact: true })).toBeVisible();
   } finally {
-    await context.close();
+    try {
+      await context.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 });
 
@@ -496,9 +493,7 @@ test("failed version-three migration preserves a version-two account and can reo
   );
   storageFault.current = null;
   await page.reload();
-  await expect(
-    page.getByText("Welcome, Anthony.", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
   await expect(page.getByText("₱1,000.00", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "View account Cash", exact: true }).click();
   await page.getByRole("button", { name: "Add expense", exact: true }).click();
@@ -962,10 +957,9 @@ test("an interrupted expense write leaves the ledger available for retry", async
 test("income and expense records survive full offline browser closure and allow another write", async ({
   browserName,
   baseURL,
-}, testInfo) => {
+}) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
-  const directory = testInfo.outputPath("expense-browser-profile");
-  await rm(directory, { recursive: true, force: true });
+  const directory = await mkdtemp(join(tmpdir(), "kuwi-expense-browser-"));
   let context = await browserType.launchPersistentContext(directory, { baseURL });
   try {
     let page = await context.newPage();
@@ -1005,7 +999,11 @@ test("income and expense records survive full offline browser closure and allow 
     await expect(page.getByText("Paycheck", { exact: true })).toBeVisible();
     await expect(page.getByText("Interest", { exact: true })).toBeVisible();
   } finally {
-    await context.close();
+    try {
+      await context.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1058,17 +1056,15 @@ test("worker interruption during setup rolls back before retry", async ({
   await page
     .getByRole("button", { name: "Save my account", exact: true })
     .click();
-  await expect(
-    page.getByText("Welcome, Anthony.", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
 });
 
 test("same-currency transfer moves funds, records its fee, and reopens offline", async ({
   browserName,
   baseURL,
-}, testInfo) => {
+}) => {
   const browserType = browserName === "webkit" ? webkit : chromium;
-  const directory = testInfo.outputPath("transfer-browser-profile");
+  const directory = await mkdtemp(join(tmpdir(), "kuwi-transfer-browser-"));
   let context = await browserType.launchPersistentContext(directory, { baseURL });
   try {
     let page = await context.newPage();
@@ -1111,7 +1107,7 @@ test("same-currency transfer moves funds, records its fee, and reopens offline",
     context = await browserType.launchPersistentContext(directory, { baseURL, offline: true });
     page = await context.newPage();
     await page.goto("/");
-    await expect(page.getByText("Welcome, Anthony.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
     await expect(page.getByText("₱0.00", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "View account Cash", exact: true }).click();
     await page.getByRole("button", { name: "Transaction history", exact: true }).click();
@@ -1127,7 +1123,11 @@ test("same-currency transfer moves funds, records its fee, and reopens offline",
     await expect(page.getByText("Move emergency cash", { exact: true })).toBeVisible();
     await expect(page.getByText("₱975.00", { exact: true })).toHaveCount(2);
   } finally {
-    await context.close();
+    try {
+      await context.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1488,4 +1488,97 @@ test("transfer eligibility is visible and cross-currency accounts remain eligibl
       to_currency_code: "USD",
     }),
   ]);
+});
+
+test("Home summarizes posted activity and keeps planned entries out of totals", async ({ page }) => {
+  await fundedSetup(page);
+  const today = await localDateOffset(page, 0);
+  const tomorrow = await localDateOffset(page, 1);
+
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("20.00");
+  await page.getByLabel("Expense note", { exact: true }).fill("Market lunch");
+  await page.getByLabel("Expense date", { exact: true }).fill(today);
+  await page.getByRole("button", { name: "Food", exact: true }).click();
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("30.00");
+  await page.getByLabel("Expense note", { exact: true }).fill("Planned groceries");
+  await page.getByLabel("Expense date", { exact: true }).fill(tomorrow);
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+
+  await page.getByRole("button", { name: "Add income", exact: true }).click();
+  await page.getByLabel("Income amount", { exact: true }).fill("100.00");
+  await page.getByLabel("Income note", { exact: true }).fill("Payday");
+  await page.getByRole("button", { name: "Salary", exact: true }).click();
+  await page.getByRole("button", { name: "Save income", exact: true }).click();
+
+  await page.getByRole("tab", { name: "Home" }).click();
+  await expect(page.getByRole("heading", { name: "Welcome, Anthony." })).toBeVisible();
+  await expect(page.getByText("₱100.00", { exact: true })).toBeVisible();
+  await expect(page.getByText("₱20.00", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("Food", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("Planned", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Planned expense, Other, −₱30\.00/ })).toBeVisible();
+  const dateRange = page.getByText("Your activity", { exact: true })
+    .locator("xpath=..")
+    .getByText(/^[A-Z][a-z]+ \d{1,2}, \d{4}(?: to [A-Z][a-z]+ \d{1,2}, \d{4})?$/);
+  const weeklyRange = await dateRange.textContent();
+  await page.getByRole("tab", { name: "Day", exact: true }).click();
+  await expect(dateRange).not.toHaveText(weeklyRange);
+  const dailyRange = await dateRange.textContent();
+  await page.getByRole("tab", { name: "Month" }).click();
+  await expect(page.getByRole("tab", { name: "Month" })).toHaveAttribute("aria-selected", "true");
+  await expect(dateRange).not.toHaveText(dailyRange);
+});
+
+test("Home keeps currency summaries separate and switches the visible totals", async ({ page }) => {
+  await fundedSetup(page);
+  await page.getByRole("tab", { name: "Wallet", exact: true }).click();
+  await page.getByRole("button", { name: "Add account", exact: true }).click();
+  await page.getByLabel("Account name", { exact: true }).fill("USD wallet");
+  await page.getByRole("button", { name: "USD US Dollar", exact: true }).click();
+  await page.getByRole("button", { name: "Save account", exact: true }).click();
+
+  await page.getByRole("button", { name: "Add transaction or transfer", exact: true }).click();
+  await page.getByRole("button", { name: "USD wallet Debit · USD", exact: true }).click();
+  await page.getByRole("button", { name: "Add expense", exact: true }).click();
+  await page.getByLabel("Expense amount", { exact: true }).fill("12.34");
+  await page.getByLabel("Expense note", { exact: true }).fill("Foreign currency meal");
+  await page.getByRole("button", { name: "Food", exact: true }).click();
+  await page.getByRole("button", { name: "Save expense", exact: true }).click();
+
+  await page.getByRole("tab", { name: "Home", exact: true }).click();
+  await expect(page.getByText("Totals use PHP records. Other currencies are shown separately.", { exact: true })).toBeVisible();
+  await expect(page.getByText("No posted expenses in this period.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "USD", exact: true }).click();
+  await expect(page.getByText("$12.34", { exact: true })).toHaveCount(2);
+  await expect(page.getByRole("button", { name: /expense, Food, −\$12\.34 USD/ })).toBeVisible();
+  await expect(page.getByText("Food", { exact: true })).toHaveCount(2);
+});
+
+test("Wallet groups and balance visibility persist as local preferences", async ({ page }) => {
+  await fundedSetup(page);
+  await page.getByRole("button", { name: "Back to accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Create a group", exact: true }).click();
+  await page.getByLabel("Group name", { exact: true }).fill("Everyday");
+  await page.getByRole("button", { name: "Create group", exact: true }).click();
+  await page.getByRole("button", { name: "Move Cash to a group", exact: true }).click();
+  await page.getByRole("button", { name: "Everyday", exact: true }).click();
+  const group = page.getByRole("button", { name: "Everyday, 1 account", exact: true });
+  await expect(group).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("button", { name: "View account Cash", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Hide balances", exact: true }).click();
+  await expect(page.getByText("••••••", { exact: true })).toBeVisible();
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Everyday, 1 account", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show balances", exact: true })).toBeVisible();
+  await expect(page.getByText("••••••", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "Home" }).click();
+  await expect(page.getByRole("heading", { name: "Welcome, Anthony." })).toBeVisible();
+  await page.getByRole("tab", { name: "Wallet" }).click();
+  await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
 });
