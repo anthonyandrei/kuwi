@@ -1,0 +1,1 @@
+[1112/054401.878:INFO:CONSOLE:0] "Uncaught (in promise) UnknownError: Failed to execute 'open' on 'CacheStorage': Unexpected internal error.", source: http://kuwi-e92da209-f1ad-40b4-a93b-9854fb26a812.localhost:54419/sw.js (0)

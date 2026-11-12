@@ -80,18 +80,23 @@ must preserve existing data and avoid partial or duplicate financial records.
   do not establish Kuwi's implementation or offline AI behavior.
 - Verify unresolved reference flows, initialization rules, finance behavior,
   and motion before implementing the affected features.
+- The next Home/Wallet and mascot pass uses phone-size browser checks for layout
+  and animation. Anthony will give feedback during his own iPhone use; this pass
+  does not require a separate iPhone or Simulator visual/animation test session.
+  See [the interface specification](docs/specs/home-wallet-mascot-motion.md).
 - Physical iPhone installation, full closure and offline reopening, storage
-  ownership, layout, motion, and keyboard checks remain outstanding. Desktop
-  browser results do not complete this acceptance.
+  ownership, and keyboard requirements remain governed by their owning issues.
+  The Home/Wallet testing decision does not close those issues.
 
 ## Brand commitments
 
 Use the Kuwi name. Follow Tarsi's screen layouts and interactions closely with
-Kuwi's accepted warm cream and sage palette. The third supplied mascot image
-is the starting direction for a quokka; its simplicity does not limit further
-detail. Final artwork, expressions, animation, typography, tagline, and mascot
-placement remain undecided. Other suggestions in the supplied brand brief
-have not been accepted as requirements.
+Kuwi's accepted warm cream and sage palette. Tarsi's mascot is the artwork style
+reference: create Kuwi as a quokka with that style's detail and finish. This
+replaces the earlier supplied quokka image as the design reference. Final
+artwork, expressions, animation, and rendering technique remain implementation
+work. Typography, tagline, and broader mascot placement remain undecided. Other
+suggestions in the supplied brand brief have not been accepted as requirements.
 
 ## Evidence on hand
 

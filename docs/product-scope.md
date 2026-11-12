@@ -1,6 +1,6 @@
 # Kuwi scope
 
-Updated: 2026-11-08
+Updated: 2026-11-12
 
 ## Confirmed direction
 
@@ -49,8 +49,17 @@ Updated: 2026-11-08
   browser parity but is not needed for Anthony's initial setup.
 - Follow Tarsi's screen layouts and interactions closely, with Kuwi's warm cream
   and sage palette.
-- Use the third supplied mascot image as the starting direction. Develop its
-  detail further; the reference image's simplicity is not a constraint.
+- Use Tarsi's mascot as the artwork style reference and create Kuwi as a quokka
+  in that style, including its detail and finish. This replaces the third
+  supplied quokka image as the design reference.
+- Focus the next interface pass on Home and grouped Wallet, using Tarsi's
+  landing-page screenshots and demos as supporting references for layout and
+  motion. The landing-page discovery does not change the pinned comparison
+  version. See [the interface specification](specs/home-wallet-mascot-motion.md).
+- For this Home/Wallet and mascot pass, check layout and animation in phone-size
+  browser viewports. Anthony will provide feedback when he opens the app on his
+  iPhone; a separate iPhone or Simulator visual/animation test pass is not
+  required. Other issues retain their own storage and device-acceptance scope.
 
 ## Decisions still open
 
